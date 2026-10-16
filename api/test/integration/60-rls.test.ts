@@ -9,7 +9,9 @@ import {
   inContext,
   makeApp,
   makeUser,
+  ownerPool,
   uniqueEmail,
+  withAllWorkspaces,
 } from "./harness.ts";
 import type { TestApp, User } from "./harness.ts";
 
@@ -189,10 +191,110 @@ describe("T-RLS and T-KEYCTX", () => {
       }
     });
 
+    it("workspaces: UPDATE and DELETE on B affect 0 rows under context A", async () => {
+      await inContext(
+        t.pool,
+        { accountId: a.accountId, workspaceIds: [wsA] },
+        async (c) => {
+          const renamed = await c.query(
+            "UPDATE workspaces SET name = 'x' WHERE id = $1",
+            [wsB],
+          );
+          expect(renamed.rowCount).toBe(0);
+          const moved = await c.query(
+            "UPDATE workspaces SET owner_id = $2 WHERE id = $1",
+            [wsB, a.accountId],
+          );
+          expect(moved.rowCount).toBe(0);
+          const deleted = await c.query(
+            "DELETE FROM workspaces WHERE id = $1",
+            [wsB],
+          );
+          expect(deleted.rowCount).toBe(0);
+          // Positive control: A's own workspace can be renamed.
+          const own = await c.query(
+            "UPDATE workspaces SET name = 'Workspace A' WHERE id = $1",
+            [wsA],
+          );
+          expect(own.rowCount).toBe(1);
+        },
+      );
+    });
+
+    it("workspaces: INSERT for another owner is refused, and status is not updatable", async () => {
+      await expect(
+        inContext(t.pool, { accountId: a.accountId }, (c) =>
+          c.query(
+            "INSERT INTO workspaces (owner_id, name, kind) VALUES ($1, 'x', 'team')",
+            [b.accountId],
+          ),
+        ),
+      ).rejects.toThrow(/row-level security/);
+      await expect(
+        inContext(
+          t.pool,
+          { accountId: a.accountId, workspaceIds: [wsA] },
+          (c) =>
+            c.query("UPDATE workspaces SET status = 'suspended' WHERE id = $1", [
+              wsA,
+            ]),
+        ),
+      ).rejects.toThrow(/permission denied/);
+    });
+
     it("a route with its permission check skipped still gets no B rows", async () => {
       const broken = await appWithHooks(t, { skipPermissionChecks: true });
       try {
         const headers = { authorization: `Bearer ${a.accessToken}` };
+        // Everything of B, read as B's own context.
+        const snapshot = () =>
+          inContext(t.pool, { workspaceIds: [wsB] }, async (c) => {
+            const one = async (sql: string) =>
+              (await c.query(sql, [wsB])).rows;
+            return {
+              workspace: await one(
+                "SELECT id, owner_id, name, kind, status FROM workspaces WHERE id = $1",
+              ),
+              members: await one(
+                "SELECT account_id, role FROM members WHERE workspace_id = $1 ORDER BY account_id",
+              ),
+              invitations: await one(
+                "SELECT id, email, role, used_at FROM invitations WHERE workspace_id = $1 ORDER BY id",
+              ),
+              limits: await one(
+                "SELECT * FROM workspace_limits WHERE workspace_id = $1",
+              ),
+              keys: await one(
+                "SELECT id, topic_id, revoked_at FROM topic_keys WHERE workspace_id = $1 ORDER BY id",
+              ),
+            };
+          });
+        const before = await snapshot();
+        expect(before.workspace).toHaveLength(1);
+        expect(before.keys.length).toBeGreaterThan(0);
+
+        const renamed = await broken.inject({
+          method: "PATCH",
+          url: `/v1/workspaces/${wsB}`,
+          headers,
+          payload: { name: "Taken over" },
+        });
+        expect(renamed.statusCode).toBe(404);
+        const transferred = await broken.inject({
+          method: "POST",
+          url: `/v1/workspaces/${wsB}/transfer`,
+          headers,
+          payload: { accountId: b.accountId },
+        });
+        expect(transferred.statusCode).toBe(404);
+        const deleted = await broken.inject({
+          method: "DELETE",
+          url: `/v1/workspaces/${wsB}`,
+          headers,
+        });
+        expect(deleted.statusCode).toBe(404);
+        expect(await snapshot()).toEqual(before);
+
         const members = await broken.inject({
           method: "GET",
           url: `/v1/workspaces/${wsB}/members`,
@@ -234,6 +336,7 @@ describe("T-RLS and T-KEYCTX", () => {
           },
         );
         expect(after).toEqual({ members: 1, invitations: 1 });
+        expect(await snapshot()).toEqual(before);
       } finally {
         await broken.close();
       }
@@ -289,10 +392,17 @@ describe("T-RLS and T-KEYCTX", () => {
       expect(
         (await resolve("pz_hhhhhhhh", "suspended-secret")).rows,
       ).toHaveLength(1);
-      await t.pool.query(
-        "UPDATE workspaces SET status = 'suspended' WHERE id = $1",
-        [wsSuspended],
-      );
+      // The app role cannot change status, so the owner role does it.
+      const db = ownerPool();
+      try {
+        await withAllWorkspaces(db, (c) =>
+          c.query("UPDATE workspaces SET status = 'suspended' WHERE id = $1", [
+            wsSuspended,
+          ]),
+        );
+      } finally {
+        await db.end();
+      }
       expect(
         (await resolve("pz_hhhhhhhh", "suspended-secret")).rows,
       ).toHaveLength(0);
@@ -328,6 +438,23 @@ describe("T-RLS and T-KEYCTX", () => {
                 has_function_privilege('pingzo_app', 'resolve_topic_key(text,bytea)', 'EXECUTE') AS app`,
       );
       expect(res.rows[0]).toEqual({ pub: false, app: true });
+    });
+
+    it("resolve_topic_key is SECURITY DEFINER with a fixed search_path and the right owner", async () => {
+      const res = await t.pool.query<{
+        prosecdef: boolean;
+        proconfig: string[] | null;
+        owner: string;
+      }>(
+        `SELECT p.prosecdef, p.proconfig, r.rolname AS owner
+           FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+          WHERE p.proname = 'resolve_topic_key'
+            AND p.pronamespace = 'public'::regnamespace`,
+      );
+      expect(res.rows).toHaveLength(1);
+      expect(res.rows[0]?.prosecdef).toBe(true);
+      expect(res.rows[0]?.proconfig).toContain("search_path=pg_catalog, pg_temp");
+      expect(res.rows[0]?.owner).toBe("pingzo_keyresolver");
     });
 
     it("withKeyContext sees exactly the key's workspace", async () => {

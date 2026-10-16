@@ -71,7 +71,9 @@ export async function makeApp(
   // first: they reference accounts, and members, invitations, limits and keys
   // cascade from them. audit_log is append-only, so it is never emptied; tests
   // read it by workspace id.
-  await pool.query("DELETE FROM workspaces");
+  // The delete policy on workspaces follows the context, so the context here
+  // names every workspace.
+  await withAllWorkspaces(pool, (c) => c.query("DELETE FROM workspaces"));
   await pool.query("DELETE FROM accounts");
   await pool.query("DELETE FROM login_failures");
   await pool.query("DELETE FROM signup_events");
@@ -102,6 +104,30 @@ export async function makeApp(
       await pool.end();
     },
   };
+}
+
+// Runs fn in a transaction (committed) whose context names every workspace, for
+// test setup that must change a workspace row directly.
+export async function withAllWorkspaces<T>(
+  pool: Pool,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const all = await client.query<{ id: string }>("SELECT id FROM workspaces");
+    await client.query("SELECT set_config('app.workspace_ids', $1, true)", [
+      `{${all.rows.map((r) => r.id).join(",")}}`,
+    ]);
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 let counter = 0;

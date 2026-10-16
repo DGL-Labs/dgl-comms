@@ -41,7 +41,8 @@ CREATE INDEX members_account_id_idx ON members (account_id);
 CREATE TABLE invitations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
-  invited_by uuid NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+  -- Set to NULL when the inviter's account is deleted: the invitation stays.
+  invited_by uuid NULL REFERENCES accounts (id) ON DELETE SET NULL,
   email citext NOT NULL,
   role text NOT NULL CHECK (role IN ('admin', 'member')),
   token_hash bytea NOT NULL UNIQUE,
@@ -88,7 +89,9 @@ REVOKE ALL ON workspaces, workspace_limits, members, invitations, topic_keys,
   service_limits, audit_log FROM pingzo_app;
 REVOKE ALL ON SEQUENCE audit_log_id_seq FROM pingzo_app;
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON workspaces TO pingzo_app;
+-- workspaces: no status or kind change from the app, and no other column.
+GRANT SELECT, INSERT, DELETE ON workspaces TO pingzo_app;
+GRANT UPDATE (name, owner_id) ON workspaces TO pingzo_app;
 GRANT SELECT, INSERT ON workspace_limits TO pingzo_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON members TO pingzo_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON invitations TO pingzo_app;
@@ -103,6 +106,27 @@ GRANT USAGE ON SEQUENCE audit_log_id_seq TO pingzo_app;
 --   workspace_id = ANY (coalesce(nullif(current_setting('app.workspace_ids', true), ''), '{}')::uuid[])
 -- The setting is SET LOCAL only, through the helpers in api/src/db.ts. A
 -- missing or empty setting gives an empty list, so no row matches.
+
+-- workspaces is the tenant table itself, so its own id is what is matched.
+-- SELECT is open (the ceiling count and the id lookup need it); writes are
+-- bound to the context.
+ALTER TABLE workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspaces FORCE ROW LEVEL SECURITY;
+CREATE POLICY workspaces_select ON workspaces FOR SELECT
+  USING (true);
+CREATE POLICY workspaces_insert ON workspaces FOR INSERT
+  WITH CHECK (owner_id = nullif(current_setting('app.account_id', true), '')::uuid);
+CREATE POLICY workspaces_update ON workspaces FOR UPDATE
+  USING (
+    id = ANY (coalesce(nullif(current_setting('app.workspace_ids', true), ''), '{}')::uuid[])
+  )
+  WITH CHECK (
+    id = ANY (coalesce(nullif(current_setting('app.workspace_ids', true), ''), '{}')::uuid[])
+  );
+CREATE POLICY workspaces_delete ON workspaces FOR DELETE
+  USING (
+    id = ANY (coalesce(nullif(current_setting('app.workspace_ids', true), ''), '{}')::uuid[])
+  );
 
 ALTER TABLE members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE members FORCE ROW LEVEL SECURITY;
@@ -133,7 +157,8 @@ CREATE POLICY invitations_workspace ON invitations
 CREATE POLICY invitations_by_token_select ON invitations FOR SELECT
   USING (token_hash = decode(nullif(current_setting('app.invite_hash', true), ''), 'hex'));
 CREATE POLICY invitations_by_token_update ON invitations FOR UPDATE
-  USING (token_hash = decode(nullif(current_setting('app.invite_hash', true), ''), 'hex'));
+  USING (token_hash = decode(nullif(current_setting('app.invite_hash', true), ''), 'hex'))
+  WITH CHECK (token_hash = decode(nullif(current_setting('app.invite_hash', true), ''), 'hex'));
 
 ALTER TABLE topic_keys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE topic_keys FORCE ROW LEVEL SECURITY;
@@ -180,3 +205,15 @@ GRANT EXECUTE ON FUNCTION public.resolve_topic_key(text, bytea) TO pingzo_app;
 GRANT CREATE ON SCHEMA public TO pingzo_keyresolver;
 ALTER FUNCTION public.resolve_topic_key(text, bytea) OWNER TO pingzo_keyresolver;
 REVOKE CREATE ON SCHEMA public FROM pingzo_keyresolver;
+-- The membership was only for the ALTER above. Take it back, so that no login
+-- role can SET ROLE to the BYPASSRLS role. In PostgreSQL 16 a role can revoke
+-- only grants that it made itself, and the bootstrap's grant was made by the
+-- superuser. So if this is refused, the superuser step of the role bootstrap
+-- (docs/DB-ROLES.md) removes it, and T-ROLE checks that it is gone.
+DO $$
+BEGIN
+  REVOKE pingzo_keyresolver FROM pingzo_owner;
+EXCEPTION WHEN insufficient_privilege THEN
+  NULL;
+END
+$$;
