@@ -35,4 +35,28 @@ Sign-up answers 403 for an address that is not on the team allowlist and 202 for
 
 ## C-1c
 
-None known. The reviewer should add any gaps found at G5.
+Accepted for C-1c (G5 round 1). Each has a later step that closes it.
+
+### Context is wider than the path (NOTE 7)
+
+The request context holds every workspace the caller belongs to, not just the one in the path. A route that forgot its permission check would see all of the caller's own workspaces. It is narrowed to the path workspace at C-1d.
+
+### `withTx` is still allowed (NOTE 8)
+
+`withTx` (no context) remains available. It is safe only for tables with RLS. Writes to `workspaces` and `audit_log` must go through `withContext`.
+
+### `skipPermissionChecks` (NOTE 9)
+
+The `skipPermissionChecks` hook comes only from `deps` and is a test hook. It is to be excluded from production builds later.
+
+### Schema name and key compare (NOTE 11)
+
+The schema is `public.`, not ADD-1's `pingzo.`. `resolve_topic_key` compares the key hash with `=` inside the function. That is acceptable because the hash is a SHA-256 of a random secret, but ADD-1's constant-time compare in the app is not done.
+
+### Invites and suspended workspaces (NOTE 12)
+
+Invite emails are not checked against the domain blocklist, and actions on suspended workspaces are still allowed. Both come at a later step.
+
+### Role bootstrap membership
+
+In PostgreSQL 16, `pingzo_owner` cannot revoke its own membership of `pingzo_keyresolver`, because the superuser made the grant. The superuser step in the role bootstrap does it after the migrations (see `docs/DB-ROLES.md`).
