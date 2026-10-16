@@ -139,6 +139,13 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run typecheck
       - run: npm run lint
+      # The builder has no shell, so on a lint failure print the exact Prettier diff for it to apply (nothing is pushed).
+      - name: Show the Prettier diff (only when lint fails)
+        if: failure()
+        run: |
+          npx --no-install prettier --write . >/dev/null
+          git --no-pager diff --stat
+          git --no-pager diff
 
   test:
     name: test (unit)
