@@ -58,7 +58,8 @@ describe("T-AUTH-DENY", () => {
     // padding bits, so it is not used).
     const i = accessToken.length - 10;
     const swapped = accessToken[i] === "A" ? "B" : "A";
-    const tampered = accessToken.slice(0, i) + swapped + accessToken.slice(i + 1);
+    const tampered =
+      accessToken.slice(0, i) + swapped + accessToken.slice(i + 1);
     expect((await del(bearer(tampered))).statusCode).toBe(401);
   });
 
@@ -81,12 +82,7 @@ describe("T-AUTH-DENY", () => {
     );
     const accountId = (account.rows[0] as { id: string }).id;
     const key = new TextEncoder().encode(t.config.jwtKey);
-    const issued = await createSession(
-      t.pool,
-      key,
-      accountId,
-      t.clock.now(),
-    );
+    const issued = await createSession(t.pool, key, accountId, t.clock.now());
     const headers = bearer(issued.accessToken);
     expect((await del(headers)).statusCode).toBe(403);
     const out = await t.app.inject({
@@ -118,7 +114,10 @@ describe("T-AUTH-DENY", () => {
 
   it("refuses a blocklisted domain and its subdomains", async () => {
     await t.close();
-    t = await makeApp({ allowlistOn: false }, new Set(["blocked.example.test"]));
+    t = await makeApp(
+      { allowlistOn: false },
+      new Set(["blocked.example.test"]),
+    );
     for (const email of [
       "u@blocked.example.test",
       "u@sub.blocked.example.test",

@@ -86,7 +86,7 @@ describe("T-THROTTLE", () => {
     });
     expect(next.statusCode).toBe(429);
     const ips = await t.pool.query<{ ip: string }>(
-      "SELECT DISTINCT ip::text AS ip FROM login_failures",
+      "SELECT DISTINCT host(ip) AS ip FROM login_failures",
     );
     expect(ips.rows.map((r) => r.ip)).toEqual(["203.0.113.20"]);
   });
@@ -101,7 +101,7 @@ describe("T-THROTTLE", () => {
     });
     expect(res.statusCode).toBe(401);
     const ips = await t.pool.query<{ ip: string }>(
-      "SELECT ip::text AS ip FROM login_failures",
+      "SELECT host(ip) AS ip FROM login_failures",
     );
     expect(ips.rows.map((r) => r.ip)).toEqual(["192.0.2.77"]);
   });

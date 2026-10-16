@@ -19,6 +19,8 @@ const BOOTSTRAP_SQL = fileURLToPath(
   new URL("../bootstrap-roles.sql", import.meta.url),
 );
 
+type RoleRow = { rolsuper: boolean; rolbypassrls: boolean };
+
 function urlFor(base: string, database: string, user?: string, pw?: string) {
   const url = new URL(base);
   url.pathname = `/${database}`;
@@ -71,10 +73,13 @@ export default async function setup({
   const probe = new pg.Client({ connectionString: appUrl });
   await probe.connect();
   try {
-    const role = await probe.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
+    const role = await probe.query<RoleRow>(
       "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
     );
-    if (role.rows[0]?.rolsuper !== false || role.rows[0].rolbypassrls !== false) {
+    if (
+      role.rows[0]?.rolsuper !== false ||
+      role.rows[0].rolbypassrls !== false
+    ) {
       throw new Error("pingzo_app must be NOSUPERUSER and NOBYPASSRLS");
     }
   } finally {

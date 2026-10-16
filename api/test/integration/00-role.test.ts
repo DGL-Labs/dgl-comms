@@ -46,6 +46,8 @@ describe("T-ROLE", () => {
   });
 
   it("cannot create tables", async () => {
-    await expect(pool.query("CREATE TABLE t_role_probe (a int)")).rejects.toThrow();
+    await expect(
+      pool.query("CREATE TABLE t_role_probe (a int)"),
+    ).rejects.toThrow();
   });
 });

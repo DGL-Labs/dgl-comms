@@ -133,7 +133,11 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
       return signupRefused(request, reply, 429, "signup_cap");
     }
     if (outcome.token !== null) {
-      await ctx.sender.send({ to: email, kind: "verify", token: outcome.token });
+      await ctx.sender.send({
+        to: email,
+        kind: "verify",
+        token: outcome.token,
+      });
     }
     request.reason = "signup_accepted";
     return reply.code(202).send(ACCEPTED);
@@ -284,9 +288,10 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
       const seen = await tx.query<{
         account_id: string;
         revoked_at: Date | null;
-      }>("SELECT account_id, revoked_at FROM sessions WHERE refresh_hash = $1", [
-        hash,
-      ]);
+      }>(
+        "SELECT account_id, revoked_at FROM sessions WHERE refresh_hash = $1",
+        [hash],
+      );
       const session = first(seen.rows);
       if (session !== undefined && session.revoked_at !== null) {
         // A revoked refresh token came back: treat the account as compromised.
