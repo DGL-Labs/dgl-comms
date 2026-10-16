@@ -67,11 +67,12 @@ jobs:
             echo "::error::No package.json yet; the builder adds it in this PR."
             exit 1
           fi
-          if [ -f package-lock.json ]; then
-            npm ci --ignore-scripts --dry-run >/dev/null
+          if [ -f package-lock.json ] && npm ci --ignore-scripts --dry-run --no-audit --no-fund >/dev/null 2>&1; then
             echo "package-lock.json is present and in sync."
             exit 0
           fi
+          echo "package-lock.json is missing or out of sync with package.json; generating."
+          rm -f package-lock.json
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund
           sha256sum package-lock.json
           echo "----- BEGIN package-lock.json (gzip+base64) -----"
@@ -99,6 +100,8 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Dependency licenses (allowlist Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, CC0-1.0)
         run: node .github/scripts/check-licenses.mjs
+      - name: Known vulnerabilities in runtime dependencies (npm audit, moderate and above)
+        run: npm audit --omit=dev --audit-level=moderate
       - name: SBOM (SPDX)
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:

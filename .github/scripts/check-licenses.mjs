@@ -4,6 +4,9 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const ALLOWED = new Set(["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "0BSD", "CC0-1.0"]);
+// Narrow, reviewed exceptions: exact package and version, development-only (never shipped), with the reason.
+// Python-2.0 (PSF) is OSI-approved and permissive; argparse comes in through eslint -> js-yaml.
+const DEV_EXCEPTIONS = new Map([["argparse@2.0.1", "Python-2.0"]]);
 const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
 const bad = [];
 let checked = 0;
@@ -25,7 +28,13 @@ for (const [path, meta] of Object.entries(lock.packages ?? {})) {
     license = typeof p.license === "string" ? p.license : p.license?.type;
   }
   checked++;
-  if (!ok(license)) bad.push(`${path.replace(/^.*node_modules\//, "")}@${meta.version ?? "?"}: ${license ?? "none"}`);
+  const id = `${path.replace(/^.*node_modules\//, "")}@${meta.version ?? "?"}`;
+  if (ok(license)) continue;
+  if (meta.dev === true && DEV_EXCEPTIONS.get(id) === license) {
+    console.log(`Exception (dev-only): ${id}: ${license}`);
+    continue;
+  }
+  bad.push(`${id}: ${license ?? "none"}${meta.dev ? " (dev)" : " (RUNTIME)"}`);
 }
 
 console.log(`Checked ${checked} packages against: ${[...ALLOWED].join(", ")}`);
