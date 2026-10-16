@@ -5,6 +5,7 @@ import { clientIp } from "./context.ts";
 import type { Ctx } from "./context.ts";
 import { first, withTx } from "./db.ts";
 import { requireSession } from "./guard.ts";
+import { isRecord, normalizeEmail } from "./input.ts";
 import { createMagicLink } from "./magic.ts";
 import { createSession, revokeAllSessions, revokeSession } from "./sessions.ts";
 import type { IssuedSession } from "./sessions.ts";
@@ -16,23 +17,14 @@ import {
   recordAttempt,
 } from "./throttle.ts";
 import { hashToken } from "./tokens.ts";
+import { registerWorkspaceRoutes } from "./workspace-routes.ts";
 
 const SIGNUP_CAP = 5;
 const SIGNUP_WINDOW_MS = 24 * 60 * 60 * 1000;
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // The same body for every sign-up and login that is accepted, so it does not
 // reveal whether the email exists.
 const ACCEPTED = { status: "accepted" };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function normalizeEmail(raw: string): string | null {
-  const email = raw.trim().toLowerCase();
-  return email.length <= 254 && EMAIL_PATTERN.test(email) ? email : null;
-}
 
 function badRequest(request: FastifyRequest, reply: FastifyReply) {
   request.reason = "bad_request";
@@ -71,6 +63,8 @@ function signupRefused(
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
+  registerWorkspaceRoutes(app, ctx);
+
   // POST /v1/auth/signup
   app.post("/v1/auth/signup", async (request, reply) => {
     const body = request.body;
