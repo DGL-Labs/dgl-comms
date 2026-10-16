@@ -1,0 +1,70 @@
+# Claude Code builder for Pingzo (plan section 9; C1-BUILD-GO-1, Governance a769621).
+# Trigger: issue_comment only. GitHub runs that event from the DEFAULT BRANCH's copy of this file, so a pull request
+# cannot change the allowlist, tools or guards that apply to its own run (G5 round 1, MUST 1).
+# Every run waits for approval on environment `claude` (Taylor is the required reviewer; deployments limited to main).
+# No Bash tool, so no repository script runs while the key is present. Tests run in the secret-less ci.yml.
+name: claude
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+concurrency:
+  group: claude-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  claude:
+    # ALLOWLIST (E4: BoaterGuy15 only; Taylor may add accounts). It appears in THREE places in this file, which must
+    # stay identical: this `if:`, the guard step's `case`, and `include_comments_by_actor`. Change all three in one PR.
+    # Pull-request comments only.
+    if: >-
+      contains(fromJSON('["BoaterGuy15"]'), github.actor) &&
+      contains(github.event.comment.body, '@claude') &&
+      github.event.issue.pull_request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: claude
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Fork and author guard (G5 round 1, MUST 2), before any step that uses the key:
+      # the PR head must be in this repository, and the PR must be authored by an allowlisted account,
+      # so the title, body and files loaded into the run come from an allowlisted, same-repo source.
+      - name: Guard - same-repository PR by an allowlisted author
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          read -r head author < <(gh api "repos/${REPO}/pulls/${PR}" --jq '[.head.repo.full_name // "", .user.login] | @tsv')
+          if [ "$head" != "$REPO" ]; then echo "Refused: PR head is '${head}', not ${REPO}." >&2; exit 1; fi
+          case "$author" in
+            BoaterGuy15) ;;   # ALLOWLIST: keep identical to the job `if:` and include_comments_by_actor
+            *) echo "Refused: PR author '${author}' is not on the allowlist." >&2; exit 1 ;;
+          esac
+          echo "Guard passed: same-repository PR by ${author}."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: anthropics/claude-code-action@97c53473391bff1901034d4b454b5bac7ab7a029 # v1.0.239
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          trigger_phrase: "@claude"
+          include_comments_by_actor: "BoaterGuy15"   # ALLOWLIST: keep identical to the job `if:` and the guard
+          # Commits go through the GitHub API (the action's file_ops tool), not `git` in Bash, so the Bash deny below
+          # does not block committing (checked in src/modes/tag/index.ts at the pinned sha; G5 round 2, item 2).
+          use_commit_signing: "true"
+          # No Bash; reads of process environments (/proc, /sys), runner temp, action and runner install folders,
+          # and dot-directories are denied (G5 rounds 1-2). Residual risk: SETTINGS-C1A.md "Residual risk".
+          claude_args: >-
+            --model claude-sonnet-5-5
+            --max-turns 30
+            --allowedTools "Read,Edit,Write,Glob,Grep"
+            --disallowedTools "Bash,Read(//proc/**),Read(//sys/**),Read(//home/runner/work/_temp/**),Read(//home/runner/work/_actions/**),Read(//home/runner/runners/**),Read(//home/runner/.*/**),Grep(//proc/**),Grep(//home/runner/work/_temp/**),Grep(//home/runner/work/_actions/**),Grep(//home/runner/runners/**),Glob(//proc/**)"

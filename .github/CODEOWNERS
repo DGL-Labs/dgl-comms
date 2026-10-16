@@ -1,0 +1,8 @@
+# Pingzo (DGL-COMMS-APP-1). Workflows, settings docs, ownership, ignore rules and licensing need Taylor's review.
+/.github/            @BoaterGuy15
+/docs/               @BoaterGuy15
+/.gitignore          @BoaterGuy15
+/.gitattributes      @BoaterGuy15
+/.gitleaks.toml      @BoaterGuy15
+/LICENSE             @BoaterGuy15
+/NOTICE              @BoaterGuy15

@@ -1,0 +1,19 @@
+# Secrets never enter the repository (plan section 6, Observer N-2). CI checks this line.
+.env*
+!.env.example
+
+# Keys and local credentials
+*.pem
+*.p8
+*.p12
+*.key
+age-key*.txt
+
+# Build output and dependencies
+node_modules/
+dist/
+build/
+coverage/
+.expo/
+*.log
+.DS_Store
