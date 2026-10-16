@@ -1,6 +1,6 @@
 # Pingzo CI (plan section 6). Secret-less: no job reads a secret, and the token is read-only.
-# Active at C-1a, while the tree has no app code: secrets, licenses, gitignore.
-# lint, test, integration, push-mock, load, sse-cf, app and release arrive with the step that brings their code.
+# C-1a jobs: secrets, licenses, gitignore. C-1b adds: lockfile, lint, test, integration (written by C&D; the builder cannot edit workflows).
+# No new third-party actions: Node 22 and npm come from the runner image (checked below); postgres is a pinned service image.
 name: ci
 
 on:
@@ -16,6 +16,9 @@ permissions:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  NODE_MAJOR: "22"
 
 jobs:
   secrets:
@@ -42,8 +45,44 @@ jobs:
       - name: Scan the full history
         run: ./gitleaks git --redact --no-banner --exit-code 1 .
 
+  # Lockfile: the builder has no shell, so package-lock.json is produced here (secret-less) and committed by C&D after review.
+  # When the lock is present and in sync, this job only verifies it.
+  lockfile:
+    name: lockfile (present and in sync)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Node and npm from the runner image
+        run: |
+          set -euo pipefail
+          node --version; npm --version
+          test "$(node -p 'process.versions.node.split(".")[0]')" = "$NODE_MAJOR"
+      - name: Verify or generate the lockfile
+        run: |
+          set -euo pipefail
+          if [ ! -f package.json ]; then
+            echo "::error::No package.json yet; the builder adds it in this PR."
+            exit 1
+          fi
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --dry-run >/dev/null
+            echo "package-lock.json is present and in sync."
+            exit 0
+          fi
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          sha256sum package-lock.json
+          echo "----- BEGIN package-lock.json (gzip+base64) -----"
+          gzip -9n -c package-lock.json | base64 -w 0; echo
+          echo "----- END package-lock.json -----"
+          echo "::error::package-lock.json is missing. C&D reviews the generated lock above and commits it."
+          exit 1
+
   licenses:
     name: licenses (allowlist and SBOM)
+    needs: lockfile
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -56,18 +95,10 @@ jobs:
           grep -q "Apache License" LICENSE
           grep -q "Version 2.0, January 2004" LICENSE
           test -s NOTICE
-      - name: Dependency licenses (allowlist Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC)
-        run: |
-          set -euo pipefail
-          # No package manifests exist at C-1a. The step that adds the first package.json
-          # replaces this guard with the real allowlist check (npm ci --ignore-scripts, then license-checker).
-          found="$(git ls-files '*package.json' '*package-lock.json' '*pnpm-lock.yaml' '*yarn.lock')"
-          if [ -n "$found" ]; then
-            echo "Dependency manifests found but the license check is not wired yet:" >&2
-            echo "$found" >&2
-            exit 1
-          fi
-          echo "No dependency manifests at this step."
+      - name: Install (no lifecycle scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Dependency licenses (allowlist Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, CC0-1.0)
+        run: node .github/scripts/check-licenses.mjs
       - name: SBOM (SPDX)
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
@@ -92,3 +123,58 @@ jobs:
           git check-ignore -q .env.production
           tracked="$(git ls-files | grep -E '(^|/)\.env' | grep -vxF '.env.example' || true)"
           if [ -n "$tracked" ]; then echo "Tracked env files: $tracked" >&2; exit 1; fi
+
+  lint:
+    name: lint (typecheck, eslint, prettier)
+    needs: lockfile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run lint
+
+  test:
+    name: test (unit)
+    needs: lockfile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+
+  integration:
+    name: integration (postgres:16, as pingzo_app)
+    needs: lockfile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        # postgres:16 pinned by index digest (Docker Hub, read 2026-10-16).
+        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      # Throwaway values for an ephemeral CI database; not secrets.
+      PINGZO_TEST_SUPERUSER_URL: postgres://postgres:ci-only-not-a-secret@localhost:5432/postgres
+      PINGZO_JWT_KEY: ci-only-not-a-secret-ci-only-not-a-secret
+      PINGZO_TEAM_ALLOWLIST: a@example.test,b@example.test
+      PINGZO_ALLOWLIST_ON: "true"
+      PINGZO_TRUSTED_PROXIES: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run test:integration
