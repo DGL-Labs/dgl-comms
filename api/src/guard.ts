@@ -1,6 +1,6 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Ctx } from "./context.ts";
-import { first } from "./db.ts";
+import { first, withTx } from "./db.ts";
 import { readAccessToken } from "./sessions.ts";
 
 export interface AuthedSession {
@@ -45,13 +45,15 @@ export async function requireSession(
   if (!UUID.test(claims.sessionId)) {
     return deny(request, reply, 401, "bad_token");
   }
-  const result = await ctx.pool.query<{ verified_at: Date | null }>(
-    `SELECT a.verified_at
-       FROM sessions s JOIN accounts a ON a.id = s.account_id
-      WHERE s.id = $1 AND s.account_id = $2
-        AND s.revoked_at IS NULL AND s.expires_at > $3
-        AND a.status = 'active'`,
-    [claims.sessionId, claims.accountId, now],
+  const result = await withTx(ctx.pool, (tx) =>
+    tx.query<{ verified_at: Date | null }>(
+      `SELECT a.verified_at
+         FROM sessions s JOIN accounts a ON a.id = s.account_id
+        WHERE s.id = $1 AND s.account_id = $2
+          AND s.revoked_at IS NULL AND s.expires_at > $3
+          AND a.status = 'active'`,
+      [claims.sessionId, claims.accountId, now],
+    ),
   );
   const row = first(result.rows);
   if (row === undefined) return deny(request, reply, 401, "session_invalid");
