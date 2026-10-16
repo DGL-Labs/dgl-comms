@@ -64,10 +64,16 @@ describe("T-RLS and T-KEYCTX", () => {
       [a, wsA],
       [b, wsB],
     ] as const) {
-      const res = await api(t, who, "POST", `/v1/workspaces/${ws}/invitations`, {
-        email: uniqueEmail(),
-        role: "member",
-      });
+      const res = await api(
+        t,
+        who,
+        "POST",
+        `/v1/workspaces/${ws}/invitations`,
+        {
+          email: uniqueEmail(),
+          role: "member",
+        },
+      );
       expect(res.statusCode).toBe(201);
     }
   });
@@ -83,18 +89,17 @@ describe("T-RLS and T-KEYCTX", () => {
 
     it("context A: sees its own rows and none of B", async () => {
       for (const table of tables) {
-        const res = await inContext(
-          t.pool,
-          { workspaceIds: [wsA] },
-          (c) =>
-            c.query<{ mine: number; theirs: number }>(
-              `SELECT count(*) FILTER (WHERE workspace_id = $1)::int AS mine,
+        const res = await inContext(t.pool, { workspaceIds: [wsA] }, (c) =>
+          c.query<{ mine: number; theirs: number }>(
+            `SELECT count(*) FILTER (WHERE workspace_id = $1)::int AS mine,
                       count(*) FILTER (WHERE workspace_id = $2)::int AS theirs
                  FROM ${table}`,
-              [wsA, wsB],
-            ),
+            [wsA, wsB],
+          ),
         );
-        expect(res.rows[0]?.mine, `${table} positive control`).toBeGreaterThan(0);
+        expect(res.rows[0]?.mine, `${table} positive control`).toBeGreaterThan(
+          0,
+        );
         expect(res.rows[0]?.theirs, table).toBe(0);
       }
     });
@@ -148,8 +153,10 @@ describe("T-RLS and T-KEYCTX", () => {
       };
       for (const [table, [sql, values]] of Object.entries(inserts)) {
         await expect(
-          inContext(t.pool, { accountId: a.accountId, workspaceIds: [wsA] }, (c) =>
-            c.query(sql, values),
+          inContext(
+            t.pool,
+            { accountId: a.accountId, workspaceIds: [wsA] },
+            (c) => c.query(sql, values),
           ),
           table,
         ).rejects.toThrow(/row-level security/);
@@ -159,11 +166,14 @@ describe("T-RLS and T-KEYCTX", () => {
     it("WITH CHECK refuses moving an A row to B", async () => {
       for (const table of tables) {
         await expect(
-          inContext(t.pool, { accountId: a.accountId, workspaceIds: [wsA] }, (c) =>
-            c.query(`UPDATE ${table} SET workspace_id = $2 WHERE workspace_id = $1`, [
-              wsA,
-              wsB,
-            ]),
+          inContext(
+            t.pool,
+            { accountId: a.accountId, workspaceIds: [wsA] },
+            (c) =>
+              c.query(
+                `UPDATE ${table} SET workspace_id = $2 WHERE workspace_id = $1`,
+                [wsA, wsB],
+              ),
           ),
           table,
         ).rejects.toThrow(/row-level security/);
@@ -208,17 +218,21 @@ describe("T-RLS and T-KEYCTX", () => {
 
         // B is untouched: its owner is still a member and it has one
         // invitation only.
-        const after = await inContext(t.pool, { workspaceIds: [wsB] }, async (c) => {
-          const m = await c.query<{ n: number }>(
-            "SELECT count(*)::int AS n FROM members WHERE workspace_id = $1",
-            [wsB],
-          );
-          const i = await c.query<{ n: number }>(
-            "SELECT count(*)::int AS n FROM invitations WHERE workspace_id = $1",
-            [wsB],
-          );
-          return { members: m.rows[0]?.n, invitations: i.rows[0]?.n };
-        });
+        const after = await inContext(
+          t.pool,
+          { workspaceIds: [wsB] },
+          async (c) => {
+            const m = await c.query<{ n: number }>(
+              "SELECT count(*)::int AS n FROM members WHERE workspace_id = $1",
+              [wsB],
+            );
+            const i = await c.query<{ n: number }>(
+              "SELECT count(*)::int AS n FROM invitations WHERE workspace_id = $1",
+              [wsB],
+            );
+            return { members: m.rows[0]?.n, invitations: i.rows[0]?.n };
+          },
+        );
         expect(after).toEqual({ members: 1, invitations: 1 });
       } finally {
         await broken.close();
@@ -247,30 +261,41 @@ describe("T-RLS and T-KEYCTX", () => {
       await seedKey(a, wsA, "pz_eeeeeeee", "expired-secret", {
         expiresAt: new Date(Date.now() - 60_000),
       });
-      expect((await resolve("pz_eeeeeeee", "expired-secret")).rows).toHaveLength(0);
+      expect(
+        (await resolve("pz_eeeeeeee", "expired-secret")).rows,
+      ).toHaveLength(0);
     });
 
     it("resolves a key that has not yet expired", async () => {
       await seedKey(a, wsA, "pz_ffffffff", "future-secret", {
         expiresAt: new Date(Date.now() + 3_600_000),
       });
-      expect((await resolve("pz_ffffffff", "future-secret")).rows).toHaveLength(1);
+      expect((await resolve("pz_ffffffff", "future-secret")).rows).toHaveLength(
+        1,
+      );
     });
 
     it("returns no row for a revoked key", async () => {
       await seedKey(a, wsA, "pz_gggggggg", "revoked-secret", {
         revokedAt: new Date(Date.now() - 60_000),
       });
-      expect((await resolve("pz_gggggggg", "revoked-secret")).rows).toHaveLength(0);
+      expect(
+        (await resolve("pz_gggggggg", "revoked-secret")).rows,
+      ).toHaveLength(0);
     });
 
     it("returns no row for a key of a suspended workspace", async () => {
       await seedKey(a, wsSuspended, "pz_hhhhhhhh", "suspended-secret");
-      expect((await resolve("pz_hhhhhhhh", "suspended-secret")).rows).toHaveLength(1);
-      await t.pool.query("UPDATE workspaces SET status = 'suspended' WHERE id = $1", [
-        wsSuspended,
-      ]);
-      expect((await resolve("pz_hhhhhhhh", "suspended-secret")).rows).toHaveLength(0);
+      expect(
+        (await resolve("pz_hhhhhhhh", "suspended-secret")).rows,
+      ).toHaveLength(1);
+      await t.pool.query(
+        "UPDATE workspaces SET status = 'suspended' WHERE id = $1",
+        [wsSuspended],
+      );
+      expect(
+        (await resolve("pz_hhhhhhhh", "suspended-secret")).rows,
+      ).toHaveLength(0);
     });
 
     it("returns no row for a malformed id", async () => {
@@ -283,7 +308,10 @@ describe("T-RLS and T-KEYCTX", () => {
         "pz_aaaaaaaa\n",
         "",
       ]) {
-        expect((await resolve(id, SECRET_A)).rows, JSON.stringify(id)).toHaveLength(0);
+        expect(
+          (await resolve(id, SECRET_A)).rows,
+          JSON.stringify(id),
+        ).toHaveLength(0);
       }
     });
 

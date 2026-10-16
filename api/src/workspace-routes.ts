@@ -264,10 +264,9 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
           "workspace.delete",
         );
         if (decision.kind !== "ok") return decision;
-        const removed = await tx.query(
-          "DELETE FROM workspaces WHERE id = $1",
-          [id],
-        );
+        const removed = await tx.query("DELETE FROM workspaces WHERE id = $1", [
+          id,
+        ]);
         if (removed.rowCount !== 1) return { kind: "not_found" as const };
         await writeAudit(tx, now, {
           actorAccountId: session.accountId,

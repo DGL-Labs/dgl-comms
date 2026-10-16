@@ -97,18 +97,21 @@ describe("invitations", () => {
     expect(message?.kind).toBe("invite");
     expect(message?.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     // Only the SHA-256 of the token is stored, and the invitation lasts 7 days.
-    const row = await withContext(t.pool, { accountId: owner.accountId }, (tx) =>
-      tx.query<{ token_hash: Buffer; role: string; span: number }>(
-        `SELECT token_hash, role,
+    const row = await withContext(
+      t.pool,
+      { accountId: owner.accountId },
+      (tx) =>
+        tx.query<{ token_hash: Buffer; role: string; span: number }>(
+          `SELECT token_hash, role,
                 extract(epoch FROM expires_at - created_at)::int AS span
            FROM invitations WHERE workspace_id = $1`,
-        [ws],
-      ),
+          [ws],
+        ),
     );
     expect(row.rows).toHaveLength(1);
-    expect(row.rows[0]?.token_hash.equals(hashToken(tokenFor(invitee.email)))).toBe(
-      true,
-    );
+    expect(
+      row.rows[0]?.token_hash.equals(hashToken(tokenFor(invitee.email))),
+    ).toBe(true);
     expect(row.rows[0]?.role).toBe("admin");
     expect(row.rows[0]?.span).toBe(WEEK_MS / 1000);
   });
@@ -133,7 +136,9 @@ describe("invitations", () => {
     const wrong = await accept(member, token);
     expect(wrong.statusCode).toBe(404);
     expect(wrong.json()).toEqual({ error: "not_found" });
-    expect((await api(t, member, "GET", `/v1/workspaces/${ws}`)).statusCode).toBe(404);
+    expect(
+      (await api(t, member, "GET", `/v1/workspaces/${ws}`)).statusCode,
+    ).toBe(404);
     expect((await accept(invitee, token)).statusCode).toBe(200);
   });
 
@@ -173,10 +178,20 @@ describe("invitations", () => {
     const created = await invite(owner, invitee.email);
     const token = tokenFor(invitee.email);
     const id = created.json<{ id: string }>().id;
-    const gone = await api(t, owner, "DELETE", `/v1/workspaces/${ws}/invitations/${id}`);
+    const gone = await api(
+      t,
+      owner,
+      "DELETE",
+      `/v1/workspaces/${ws}/invitations/${id}`,
+    );
     expect(gone.statusCode).toBe(204);
     expect((await accept(invitee, token)).statusCode).toBe(404);
-    const twice = await api(t, owner, "DELETE", `/v1/workspaces/${ws}/invitations/${id}`);
+    const twice = await api(
+      t,
+      owner,
+      "DELETE",
+      `/v1/workspaces/${ws}/invitations/${id}`,
+    );
     expect(twice.statusCode).toBe(404);
   });
 
@@ -184,9 +199,16 @@ describe("invitations", () => {
     const other = await createWorkspace(t, owner, "Other");
     const created = await invite(owner, invitee.email, "member", other);
     const id = created.json<{ id: string }>().id;
-    const res = await api(t, owner, "DELETE", `/v1/workspaces/${ws}/invitations/${id}`);
+    const res = await api(
+      t,
+      owner,
+      "DELETE",
+      `/v1/workspaces/${ws}/invitations/${id}`,
+    );
     expect(res.statusCode).toBe(404);
-    expect((await accept(invitee, tokenFor(invitee.email))).statusCode).toBe(200);
+    expect((await accept(invitee, tokenFor(invitee.email))).statusCode).toBe(
+      200,
+    );
   });
 
   it("a token for one workspace joins only that workspace", async () => {
@@ -197,14 +219,18 @@ describe("invitations", () => {
     expect(stolen.statusCode).toBe(404);
     const res = await accept(invitee, tokenFor(invitee.email));
     expect(res.json()).toEqual({ workspace_id: ws });
-    expect((await api(t, invitee, "GET", `/v1/workspaces/${mine}`)).statusCode).toBe(404);
+    expect(
+      (await api(t, invitee, "GET", `/v1/workspaces/${mine}`)).statusCode,
+    ).toBe(404);
   });
 
   it("refuses an invitation for the owner role, a bad email, and a duplicate", async () => {
     expect((await invite(owner, invitee.email, "owner")).statusCode).toBe(400);
     expect((await invite(owner, "not-an-email")).statusCode).toBe(400);
     expect((await invite(owner, invitee.email)).statusCode).toBe(201);
-    expect((await invite(owner, invitee.email.toUpperCase())).statusCode).toBe(409);
+    expect((await invite(owner, invitee.email.toUpperCase())).statusCode).toBe(
+      409,
+    );
   });
 
   it("refuses to invite someone who is already a member, at accept", async () => {
@@ -224,21 +250,36 @@ describe("invitations", () => {
       const over = await invite(owner, uniqueEmail());
       expect(over.statusCode).toBe(429);
       // Cancelling does not give the slot back.
-      const rows = await withContext(t.pool, { accountId: owner.accountId }, (tx) =>
-        tx.query<{ id: string }>("SELECT id FROM invitations WHERE workspace_id = $1", [
-          ws,
-        ]),
+      const rows = await withContext(
+        t.pool,
+        { accountId: owner.accountId },
+        (tx) =>
+          tx.query<{ id: string }>(
+            "SELECT id FROM invitations WHERE workspace_id = $1",
+            [ws],
+          ),
       );
       const first = rows.rows[0]?.id;
-      await api(t, owner, "DELETE", `/v1/workspaces/${ws}/invitations/${first}`);
+      await api(
+        t,
+        owner,
+        "DELETE",
+        `/v1/workspaces/${ws}/invitations/${first}`,
+      );
       expect((await invite(owner, uniqueEmail())).statusCode).toBe(429);
       // A day later it works again.
       t.clock.advance(24 * 60 * 60 * 1000 + 1000);
       const fresh = await relogin(owner, "198.51.100.252");
-      const later = await api(t, fresh, "POST", `/v1/workspaces/${ws}/invitations`, {
-        email: uniqueEmail(),
-        role: "member",
-      });
+      const later = await api(
+        t,
+        fresh,
+        "POST",
+        `/v1/workspaces/${ws}/invitations`,
+        {
+          email: uniqueEmail(),
+          role: "member",
+        },
+      );
       expect(later.statusCode).toBe(201);
     });
 
@@ -271,7 +312,12 @@ describe("invitations", () => {
 
     it("counts pending invitations towards max_members", async () => {
       // The owner is 1 of 5 members.
-      const emails = [uniqueEmail(), uniqueEmail(), uniqueEmail(), uniqueEmail()];
+      const emails = [
+        uniqueEmail(),
+        uniqueEmail(),
+        uniqueEmail(),
+        uniqueEmail(),
+      ];
       for (const email of emails) {
         expect((await invite(owner, email)).statusCode).toBe(201);
       }

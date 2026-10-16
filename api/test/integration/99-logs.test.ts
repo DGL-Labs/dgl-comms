@@ -76,7 +76,12 @@ describe("T-LOGS", () => {
     const guest = await makeUser(t);
     const workspaceId = await createWorkspace(t, host, "Log probe");
     await addMember(t, host, workspaceId, guest);
-    await api(t, guest, "DELETE", `/v1/workspaces/${workspaceId}/members/${guest.accountId}`);
+    await api(
+      t,
+      guest,
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/members/${guest.accountId}`,
+    );
     await t.app.inject({ method: "GET", url: "/healthz", headers: extra });
     await t.app.inject({
       method: "POST",

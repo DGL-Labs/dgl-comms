@@ -123,17 +123,20 @@ describe("workspaces", () => {
 
     it("lets only the owner delete, and removes everything in it", async () => {
       const id = await team();
-      expect((await api(t, admin, "DELETE", `/v1/workspaces/${id}`)).statusCode).toBe(
-        403,
-      );
-      expect((await api(t, owner, "DELETE", `/v1/workspaces/${id}`)).statusCode).toBe(
-        204,
-      );
+      expect(
+        (await api(t, admin, "DELETE", `/v1/workspaces/${id}`)).statusCode,
+      ).toBe(403);
+      expect(
+        (await api(t, owner, "DELETE", `/v1/workspaces/${id}`)).statusCode,
+      ).toBe(204);
       for (const who of [owner, admin, member]) {
         const got = await api(t, who, "GET", `/v1/workspaces/${id}`);
         expect(got.statusCode).toBe(404);
       }
-      const rows = await t.pool.query("SELECT 1 FROM workspaces WHERE id = $1", [id]);
+      const rows = await t.pool.query(
+        "SELECT 1 FROM workspaces WHERE id = $1",
+        [id],
+      );
       expect(rows.rowCount).toBe(0);
     });
 
@@ -148,9 +151,9 @@ describe("workspaces", () => {
       const target = await team();
       const mine = await createWorkspace(t, outsider, "Mine");
       // Positive control: the outsider is a real member of its own workspace.
-      expect((await api(t, outsider, "GET", `/v1/workspaces/${mine}`)).statusCode).toBe(
-        200,
-      );
+      expect(
+        (await api(t, outsider, "GET", `/v1/workspaces/${mine}`)).statusCode,
+      ).toBe(200);
       const base = `/v1/workspaces/${target}`;
       const calls: [Parameters<typeof api>[2], string, object?][] = [
         ["GET", base],
@@ -161,7 +164,11 @@ describe("workspaces", () => {
         ["DELETE", `${base}/members/${member.accountId}`],
         ["DELETE", `${base}/members/${outsider.accountId}`],
         ["POST", `${base}/transfer`, { accountId: outsider.accountId }],
-        ["POST", `${base}/invitations`, { email: outsider.email, role: "admin" }],
+        [
+          "POST",
+          `${base}/invitations`,
+          { email: outsider.email, role: "admin" },
+        ],
         ["DELETE", `${base}/invitations/${randomUUID()}`],
       ];
       for (const [method, url, payload] of calls) {
@@ -186,7 +193,11 @@ describe("workspaces", () => {
       const id = await team();
       const base = `/v1/workspaces/${id}`;
       const calls: [Parameters<typeof api>[2], string, object?][] = [
-        ["POST", `${base}/invitations`, { email: outsider.email, role: "member" }],
+        [
+          "POST",
+          `${base}/invitations`,
+          { email: outsider.email, role: "member" },
+        ],
         ["DELETE", `${base}/invitations/${randomUUID()}`],
         ["DELETE", `${base}/members/${admin.accountId}`],
         ["PATCH", `${base}/members/${admin.accountId}`, { role: "member" }],
@@ -200,7 +211,9 @@ describe("workspaces", () => {
       }
       // A member may still read.
       expect((await api(t, member, "GET", base)).statusCode).toBe(200);
-      expect((await api(t, member, "GET", `${base}/members`)).statusCode).toBe(200);
+      expect((await api(t, member, "GET", `${base}/members`)).statusCode).toBe(
+        200,
+      );
       expect((await roles(id)).size).toBe(3);
     });
 
@@ -287,9 +300,9 @@ describe("workspaces", () => {
           `/v1/workspaces/${id}/members/${who.accountId}`,
         );
         expect(res.statusCode).toBe(204);
-        expect((await api(t, who, "GET", `/v1/workspaces/${id}`)).statusCode).toBe(
-          404,
-        );
+        expect(
+          (await api(t, who, "GET", `/v1/workspaces/${id}`)).statusCode,
+        ).toBe(404);
       }
       expect([...(await roles(id)).keys()]).toEqual([owner.accountId]);
     });
@@ -313,7 +326,12 @@ describe("workspaces", () => {
         accountId: admin.accountId,
       });
       expect(res.statusCode).toBe(200);
-      const asAdmin = await api(t, admin, "GET", `/v1/workspaces/${id}/members`);
+      const asAdmin = await api(
+        t,
+        admin,
+        "GET",
+        `/v1/workspaces/${id}/members`,
+      );
       const map = new Map(
         asAdmin.json<MemberList>().members.map((m) => [m.account_id, m.role]),
       );
@@ -325,12 +343,12 @@ describe("workspaces", () => {
       );
       expect(row.rows[0]?.owner_id).toBe(admin.accountId);
       // The old owner can no longer delete.
-      expect((await api(t, owner, "DELETE", `/v1/workspaces/${id}`)).statusCode).toBe(
-        403,
-      );
-      expect((await api(t, admin, "DELETE", `/v1/workspaces/${id}`)).statusCode).toBe(
-        204,
-      );
+      expect(
+        (await api(t, owner, "DELETE", `/v1/workspaces/${id}`)).statusCode,
+      ).toBe(403);
+      expect(
+        (await api(t, admin, "DELETE", `/v1/workspaces/${id}`)).statusCode,
+      ).toBe(204);
     });
 
     it("needs a member as the target, and not the owner", async () => {
@@ -385,17 +403,19 @@ describe("workspaces", () => {
         );
         const n = existing.rows[0]?.n ?? 0;
         await createWorkspace(t, owner, "First");
-        await owner_.query("UPDATE service_limits SET max_workspaces_total = $1", [
-          n + 1,
-        ]);
+        await owner_.query(
+          "UPDATE service_limits SET max_workspaces_total = $1",
+          [n + 1],
+        );
         const res = await api(t, outsider, "POST", "/v1/workspaces", {
           name: "Over",
           kind: "team",
         });
         expect(res.statusCode).toBe(503);
-        await owner_.query("UPDATE service_limits SET max_workspaces_total = $1", [
-          n + 2,
-        ]);
+        await owner_.query(
+          "UPDATE service_limits SET max_workspaces_total = $1",
+          [n + 2],
+        );
         await createWorkspace(t, outsider, "Fits");
         expect(
           (
@@ -406,7 +426,9 @@ describe("workspaces", () => {
           ).statusCode,
         ).toBe(503);
       } finally {
-        await owner_.query("UPDATE service_limits SET max_workspaces_total = 2000");
+        await owner_.query(
+          "UPDATE service_limits SET max_workspaces_total = 2000",
+        );
         await owner_.end();
       }
     });
@@ -429,16 +451,38 @@ describe("workspaces", () => {
       await api(t, owner, "PATCH", `/v1/workspaces/${id}`, { name: "Renamed" });
       await addMember(t, owner, id, admin, "admin"); // invite.create + invite.accept
       await addMember(t, owner, id, member, "member"); // again
-      await api(t, owner, "PATCH", `/v1/workspaces/${id}/members/${member.accountId}`, {
-        role: "admin",
-      });
-      const invited = await api(t, owner, "POST", `/v1/workspaces/${id}/invitations`, {
-        email: outsider.email,
-        role: "member",
-      });
+      await api(
+        t,
+        owner,
+        "PATCH",
+        `/v1/workspaces/${id}/members/${member.accountId}`,
+        {
+          role: "admin",
+        },
+      );
+      const invited = await api(
+        t,
+        owner,
+        "POST",
+        `/v1/workspaces/${id}/invitations`,
+        {
+          email: outsider.email,
+          role: "member",
+        },
+      );
       const inviteId = invited.json<{ id: string }>().id;
-      await api(t, owner, "DELETE", `/v1/workspaces/${id}/invitations/${inviteId}`);
-      await api(t, owner, "DELETE", `/v1/workspaces/${id}/members/${member.accountId}`);
+      await api(
+        t,
+        owner,
+        "DELETE",
+        `/v1/workspaces/${id}/invitations/${inviteId}`,
+      );
+      await api(
+        t,
+        owner,
+        "DELETE",
+        `/v1/workspaces/${id}/members/${member.accountId}`,
+      );
       await api(t, owner, "POST", `/v1/workspaces/${id}/transfer`, {
         accountId: admin.accountId,
       });
@@ -470,9 +514,9 @@ describe("workspaces", () => {
 
     it("cannot be changed or deleted by the app role, and holds no email", async () => {
       await createWorkspace(t, owner, "Audited");
-      await expect(t.pool.query("UPDATE audit_log SET reason = 'x'")).rejects.toThrow(
-        /permission denied/,
-      );
+      await expect(
+        t.pool.query("UPDATE audit_log SET reason = 'x'"),
+      ).rejects.toThrow(/permission denied/);
       await expect(t.pool.query("DELETE FROM audit_log")).rejects.toThrow(
         /permission denied/,
       );

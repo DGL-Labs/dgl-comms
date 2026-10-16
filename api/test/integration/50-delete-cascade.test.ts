@@ -129,7 +129,12 @@ describe("T-DELETE-CASCADE", () => {
       });
 
     const memberIds = async (who: Tokens, workspaceId: string) => {
-      const res = await api(t, who, "GET", `/v1/workspaces/${workspaceId}/members`);
+      const res = await api(
+        t,
+        who,
+        "GET",
+        `/v1/workspaces/${workspaceId}/members`,
+      );
       expect(res.statusCode).toBe(200);
       return res
         .json<{ members: { account_id: string }[] }>()
@@ -146,7 +151,9 @@ describe("T-DELETE-CASCADE", () => {
       for (const confirm of [false, true]) {
         const res = await del(owner, confirm);
         expect(res.statusCode, `confirm ${confirm}`).toBe(409);
-        expect(res.json()).toEqual({ owned_workspaces: [{ id: ws, members: 2 }] });
+        expect(res.json()).toEqual({
+          owned_workspaces: [{ id: ws, members: 2 }],
+        });
       }
       // Nothing was deleted: the account, its sessions and the workspace.
       expect(await rows("accounts", "id", owner.accountId)).toBe(1);
@@ -155,7 +162,9 @@ describe("T-DELETE-CASCADE", () => {
       expect(await memberIds(other, ws)).toEqual(
         [owner.accountId, other.accountId].sort(),
       );
-      expect((await api(t, owner, "GET", "/v1/workspaces")).statusCode).toBe(200);
+      expect((await api(t, owner, "GET", "/v1/workspaces")).statusCode).toBe(
+        200,
+      );
     });
 
     it("proceeds after the owner transfers the workspace", async () => {
@@ -163,9 +172,15 @@ describe("T-DELETE-CASCADE", () => {
       const other = await makeUser(t);
       const ws = await createWorkspace(t, owner);
       await addMember(t, owner, ws, other);
-      const moved = await api(t, owner, "POST", `/v1/workspaces/${ws}/transfer`, {
-        accountId: other.accountId,
-      });
+      const moved = await api(
+        t,
+        owner,
+        "POST",
+        `/v1/workspaces/${ws}/transfer`,
+        {
+          accountId: other.accountId,
+        },
+      );
       expect(moved.statusCode).toBe(200);
       expect((await del(owner)).statusCode).toBe(204);
       expect(await rows("accounts", "id", owner.accountId)).toBe(0);
@@ -181,7 +196,8 @@ describe("T-DELETE-CASCADE", () => {
       const warned = await del(owner);
       expect(warned.statusCode).toBe(409);
       expect(
-        warned.json<{ owned_workspaces: { id: string; action: string }[] }>()
+        warned
+          .json<{ owned_workspaces: { id: string; action: string }[] }>()
           .owned_workspaces.sort((x, y) => x.id.localeCompare(y.id)),
       ).toEqual(
         [
@@ -208,7 +224,9 @@ describe("T-DELETE-CASCADE", () => {
           GROUP BY action`,
         [owner.accountId],
       );
-      expect(Object.fromEntries(audit.rows.map((r) => [r.action, r.n]))).toEqual({
+      expect(
+        Object.fromEntries(audit.rows.map((r) => [r.action, r.n])),
+      ).toEqual({
         "workspace.delete": 2,
         "account.delete": 1,
       });

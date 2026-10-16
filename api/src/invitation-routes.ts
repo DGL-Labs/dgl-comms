@@ -24,10 +24,7 @@ function param(request: FastifyRequest, name: string): string | null {
   return isUuid(value) ? value : null;
 }
 
-export function registerInvitationRoutes(
-  app: FastifyInstance,
-  ctx: Ctx,
-): void {
+export function registerInvitationRoutes(app: FastifyInstance, ctx: Ctx): void {
   // POST /v1/workspaces/:id/invitations {email, role}
   app.post("/v1/workspaces/:id/invitations", async (request, reply) => {
     const session = await requireSession(ctx, request, reply, {
