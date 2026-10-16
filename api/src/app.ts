@@ -9,6 +9,7 @@ import type { Clock, Ctx } from "./context.ts";
 import type { EmailSender } from "./email.ts";
 import { createLogger } from "./log.ts";
 import type { LogSink } from "./log.ts";
+import { registerRoutes } from "./routes.ts";
 
 export interface AppDeps {
   pool: Pool;
@@ -81,6 +82,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.get("/healthz", (_request, reply) => {
     return reply.code(200).send({ ok: true });
   });
+
+  registerRoutes(app, ctx);
 
   return app;
 }
