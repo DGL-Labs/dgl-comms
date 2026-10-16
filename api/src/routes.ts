@@ -6,11 +6,7 @@ import type { Ctx } from "./context.ts";
 import { first, withTx } from "./db.ts";
 import { requireSession } from "./guard.ts";
 import { createMagicLink } from "./magic.ts";
-import {
-  createSession,
-  revokeAllSessions,
-  revokeSession,
-} from "./sessions.ts";
+import { createSession, revokeAllSessions, revokeSession } from "./sessions.ts";
 import type { IssuedSession } from "./sessions.ts";
 import { checkThrottle, recordFailure } from "./throttle.ts";
 import { hashToken } from "./tokens.ts";
