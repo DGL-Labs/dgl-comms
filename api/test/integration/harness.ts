@@ -1,7 +1,7 @@
 import { appendFileSync } from "node:fs";
 import type { FastifyInstance } from "fastify";
 import pg from "pg";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { inject } from "vitest";
 import { buildApp } from "../../src/app.ts";
 import { loadConfig } from "../../src/config.ts";
@@ -67,7 +67,11 @@ export async function makeApp(
 ): Promise<TestApp> {
   const config = testConfig(overrides);
   const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 5 });
-  // Tables are emptied with DELETE: pingzo_app has no TRUNCATE.
+  // Tables are emptied with DELETE: pingzo_app has no TRUNCATE. Workspaces go
+  // first: they reference accounts, and members, invitations, limits and keys
+  // cascade from them. audit_log is append-only, so it is never emptied; tests
+  // read it by workspace id.
+  await pool.query("DELETE FROM workspaces");
   await pool.query("DELETE FROM accounts");
   await pool.query("DELETE FROM login_failures");
   await pool.query("DELETE FROM signup_events");
@@ -141,6 +145,142 @@ export async function redeem(
     headers,
     payload: { token },
   });
+}
+
+export type Method = "GET" | "POST" | "PATCH" | "DELETE";
+
+export interface User extends Tokens {
+  email: string;
+}
+
+// An authenticated request.
+export function api(
+  t: TestApp,
+  who: Tokens,
+  method: Method,
+  url: string,
+  payload?: object,
+) {
+  return t.app.inject({
+    method,
+    url,
+    headers: bearer(who.accessToken),
+    ...(payload === undefined ? {} : { payload }),
+  });
+}
+
+let userCounter = 0;
+
+// A verified account. Each one signs up from its own address, so the per-IP
+// sign-up cap never gets in the way.
+export async function makeUser(t: TestApp): Promise<User> {
+  userCounter += 1;
+  const email = uniqueEmail();
+  const tokens = await signupAndVerify(
+    t,
+    email,
+    `198.51.100.${(userCounter % 250) + 1}`,
+  );
+  return { ...tokens, email };
+}
+
+export async function createWorkspace(
+  t: TestApp,
+  who: Tokens,
+  name = "Test workspace",
+  kind: "client" | "team" = "team",
+): Promise<string> {
+  const res = await api(t, who, "POST", "/v1/workspaces", { name, kind });
+  if (res.statusCode !== 201) {
+    throw new Error(`workspace create gave ${res.statusCode}`);
+  }
+  return res.json<{ id: string }>().id;
+}
+
+// Invites the user and has them accept, through the API.
+export async function addMember(
+  t: TestApp,
+  inviter: Tokens,
+  workspaceId: string,
+  user: User,
+  role: "admin" | "member" = "member",
+): Promise<void> {
+  const res = await api(
+    t,
+    inviter,
+    "POST",
+    `/v1/workspaces/${workspaceId}/invitations`,
+    { email: user.email, role },
+  );
+  if (res.statusCode !== 201) throw new Error(`invite gave ${res.statusCode}`);
+  const message = t.sender.lastTo(user.email);
+  if (message === undefined || message.kind !== "invite") {
+    throw new Error("no invite email was sent");
+  }
+  registerSecret(message.token);
+  const joined = await api(t, user, "POST", "/v1/invitations/accept", {
+    token: message.token,
+  });
+  if (joined.statusCode !== 200) {
+    throw new Error(`accept gave ${joined.statusCode}`);
+  }
+}
+
+// A second app on the same database, with a test hook set.
+export async function appWithHooks(
+  t: TestApp,
+  testHooks: { skipPermissionChecks?: boolean },
+): Promise<FastifyInstance> {
+  const logFile = inject("logFile");
+  const app = buildApp({
+    pool: t.pool,
+    config: t.config,
+    sender: t.sender,
+    clock: t.clock,
+    blocklist: new Set(),
+    testHooks,
+    logSink: (line) => appendFileSync(logFile, `${line}\n`),
+  });
+  await app.ready();
+  return app;
+}
+
+// Runs raw SQL as pingzo_app in a transaction with the given request context
+// (set the way withContext does), then rolls back. For testing row-level
+// security directly, without the helpers in src/db.ts.
+export async function inContext<T>(
+  pool: Pool,
+  settings: { accountId?: string; workspaceIds?: string[]; raw?: string },
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    if (settings.accountId !== undefined) {
+      await client.query("SELECT set_config('app.account_id', $1, true)", [
+        settings.accountId,
+      ]);
+    }
+    if (settings.workspaceIds !== undefined) {
+      await client.query("SELECT set_config('app.workspace_ids', $1, true)", [
+        `{${settings.workspaceIds.join(",")}}`,
+      ]);
+    }
+    if (settings.raw !== undefined) {
+      await client.query("SELECT set_config('app.workspace_ids', $1, true)", [
+        settings.raw,
+      ]);
+    }
+    return await fn(client);
+  } finally {
+    await client.query("ROLLBACK").catch(() => undefined);
+    client.release();
+  }
+}
+
+// A pool as pingzo_owner, to change a limit that the app cannot change.
+export function ownerPool(): Pool {
+  return new pg.Pool({ connectionString: inject("ownerUrl"), max: 2 });
 }
 
 // Signs up, redeems the verify link, and returns the session tokens.

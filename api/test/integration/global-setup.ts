@@ -10,6 +10,8 @@ import { runMigrations } from "../../src/migrate.ts";
 declare module "vitest" {
   export interface ProvidedContext {
     dbUrl: string;
+    // pingzo_owner, for tests that must change a limit the app cannot change.
+    ownerUrl: string;
     logFile: string;
     secretsFile: string;
   }
@@ -93,6 +95,10 @@ export default async function setup({
   writeFileSync(secretsFile, "");
 
   provide("dbUrl", appUrl);
+  provide(
+    "ownerUrl",
+    urlFor(superUrl, database, "pingzo_owner", ownerPassword),
+  );
   provide("logFile", logFile);
   provide("secretsFile", secretsFile);
 
