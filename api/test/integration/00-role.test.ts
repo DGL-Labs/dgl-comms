@@ -45,6 +45,18 @@ describe("T-ROLE", () => {
     expect(databases.rows[0]?.n).toBe(0);
   });
 
+  it("has no UPDATE on the event tables, but SELECT, INSERT, DELETE", async () => {
+    const res = await pool.query<{ t: string; p: string; ok: boolean }>(
+      `SELECT t, p, has_table_privilege(current_user, t, p) AS ok
+         FROM unnest(ARRAY['signup_events', 'login_failures']) AS t,
+              unnest(ARRAY['SELECT', 'INSERT', 'DELETE', 'UPDATE']) AS p`,
+    );
+    expect(res.rows).toHaveLength(8);
+    for (const row of res.rows) {
+      expect(row.ok, `${row.t} ${row.p}`).toBe(row.p !== "UPDATE");
+    }
+  });
+
   it("cannot create tables", async () => {
     await expect(
       pool.query("CREATE TABLE t_role_probe (a int)"),
