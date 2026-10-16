@@ -25,7 +25,9 @@ jobs:
       contains(github.event.comment.body, '@claude') &&
       github.event.issue.pull_request
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Hard stop per run. --max-turns is only checked after the run ends (run 38932643713: 76 turns against 30),
+    # so this timeout is the real per-run bound (that run took 10.4 min, US$1.68).
+    timeout-minutes: 20
     environment: claude
     permissions:
       contents: write
