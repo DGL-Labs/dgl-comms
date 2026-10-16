@@ -1,0 +1,93 @@
+# Pingzo CI (plan section 6). Secret-less: no job reads a secret, and the token is read-only.
+# Active at C-1a, while the tree has no app code: secrets, licenses, gitignore.
+# lint, test, integration, push-mock, load, sse-cf, app and release arrive with the step that brings their code.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "claude/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: secrets (gitleaks, full history)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (checksum-verified release binary)
+        run: |
+          set -euo pipefail
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          echo "${GITLEAKS_SHA256}  ${f}" | sha256sum -c -
+          tar -xzf "$f" gitleaks
+          ./gitleaks version
+      - name: Scan the full history
+        run: ./gitleaks git --redact --no-banner --exit-code 1 .
+
+  licenses:
+    name: licenses (allowlist and SBOM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Project license is Apache-2.0
+        run: |
+          set -euo pipefail
+          grep -q "Apache License" LICENSE
+          grep -q "Version 2.0, January 2004" LICENSE
+          test -s NOTICE
+      - name: Dependency licenses (allowlist Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC)
+        run: |
+          set -euo pipefail
+          # No package manifests exist at C-1a. The step that adds the first package.json
+          # replaces this guard with the real allowlist check (npm ci --ignore-scripts, then license-checker).
+          found="$(git ls-files '*package.json' '*package-lock.json' '*pnpm-lock.yaml' '*yarn.lock')"
+          if [ -n "$found" ]; then
+            echo "Dependency manifests found but the license check is not wired yet:" >&2
+            echo "$found" >&2
+            exit 1
+          fi
+          echo "No dependency manifests at this step."
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          artifact-name: sbom.spdx.json
+          upload-release-assets: false
+
+  gitignore:
+    name: gitignore (.env* is ignored)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: .env* is in .gitignore and nothing matching it is tracked
+        run: |
+          set -euo pipefail
+          grep -qxF '.env*' .gitignore
+          git check-ignore -q .env
+          git check-ignore -q .env.production
+          tracked="$(git ls-files | grep -E '(^|/)\.env' | grep -vxF '.env.example' || true)"
+          if [ -n "$tracked" ]; then echo "Tracked env files: $tracked" >&2; exit 1; fi
