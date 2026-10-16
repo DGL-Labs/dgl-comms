@@ -106,10 +106,13 @@ Create `api/src/permissions.ts`, exporting one table that maps each action to th
 - **Audit (fixed fields):** workspace create, rename, delete, transfer, role change, member removal, invite create, cancel and accept.
 
 ## Account deletion (A9, extending `deleteAccount`)
-- **The first call** `DELETE /v1/account` returns **409** with `{owned_workspaces:[{id, action}]}` when the caller owns workspaces, where `action` is:
-  - `transfer`: to the longest-standing admin, else the longest-standing member;
-  - `delete`: there are no other members.
-- **Repeating with `?confirm=true`** performs those actions in the same transaction as the account deletion, and also removes all of the caller's memberships. Audit rows are written.
+**Account deletion never deletes, or silently transfers, a workspace that holds other members' data** (PC ruling).
+- **Refused while shared.** `DELETE /v1/account` returns **409** `{owned_workspaces:[{id, members}]}`, and deletes nothing, while the caller owns **any** workspace that has other members. The owner must first transfer it (`POST …/transfer`) or delete it (`DELETE /v1/workspaces/:id`), explicitly and one workspace at a time. This applies with or without `confirm`.
+- **Solely-owned workspaces only.** When every owned workspace has the caller as its **only** member:
+  - without `?confirm=true` it returns **409** `{owned_workspaces:[{id, action:"delete"}]}` as the warning;
+  - with `?confirm=true` it deletes those solely-owned workspaces, all the caller's memberships and the account, in one transaction.
+- **Audit rows** are written for each workspace deleted, and for the account deletion.
+- **No ownership is ever transferred automatically.**
 
 ## Tests (keep all C-1b tests green)
 - **T-ROLE** (extend): the `pingzo_app` flags as before. `pingzo_keyresolver`: `rolcanlogin` false, `rolbypassrls` true, and it owns exactly one object (the function).
@@ -132,7 +135,11 @@ Create `api/src/permissions.ts`, exporting one table that maps each action to th
 - **T-INVITE-CAPS:** the 21st invite in a day per account and the 51st per workspace are refused; reused, expired, cancelled and wrong-email invites fail; `max_members` is respected.
 - **T-WS-CAPS:** the 4th workspace for an account gets 409; the global ceiling (set low in the test) gets 503.
 - **T-AUDIT:** each action writes exactly one row; `pingzo_app` UPDATE and DELETE on `audit_log` fail.
-- **T-DELETE-CASCADE** (extend): the 409 warning lists the right actions; the confirm path transfers to the right member or deletes; memberships are gone.
+- **T-DELETE-CASCADE** (extend):
+  - an account owning a workspace **with other members** gets 409, with and without `?confirm=true`, and nothing is deleted;
+  - after the owner transfers that workspace, deletion proceeds;
+  - an account owning only **sole-member** workspaces gets the 409 warning, then `?confirm=true` deletes those workspaces, the memberships and the account;
+  - another member's data in a workspace the deleted account had only joined (not owned) remains.
 - **T-LOGS:** still clean, including no invite tokens or invitee emails.
 - **Static-query check** (unit).
 
