@@ -42,7 +42,8 @@ describe("T-DELETE-CASCADE", () => {
     const email = uniqueEmail();
     const one = await signupAndVerify(t, email);
     const id = one.accountId;
-    // A second session, a pending login link, and a failure for the account.
+    // A second session, a pending login link, and a failure row inserted
+    // directly (a replayed link now counts against the IP only).
     await requestLogin(email);
     const link = t.sender.lastTo(email) as { token: string };
     expect((await redeem(t, link.token)).statusCode).toBe(200);
@@ -50,6 +51,10 @@ describe("T-DELETE-CASCADE", () => {
     await requestLogin(email);
     expect(await rows("sessions", "account_id", id)).toBe(2);
     expect(await rows("magic_links", "account_id", id)).toBe(3);
+    await t.pool.query(
+      "INSERT INTO login_failures (account_id, ip) VALUES ($1, '198.51.100.9')",
+      [id],
+    );
     expect(await rows("login_failures", "account_id", id)).toBe(1);
 
     t.revoked.length = 0;
