@@ -57,6 +57,16 @@ export function registerInvitationRoutes(app: FastifyInstance, ctx: Ctx): void {
         if (email === null || role === null) {
           return { kind: "bad_request" as const };
         }
+        // Refused before any cap or member slot is used: the address already
+        // belongs to a member of this workspace.
+        const existing = await tx.query(
+          `SELECT 1 FROM members m JOIN accounts a ON a.id = m.account_id
+            WHERE m.workspace_id = $1 AND a.email = $2`,
+          [id, email],
+        );
+        if (existing.rows.length > 0) {
+          return { kind: "already_member" as const };
+        }
         // One invite at a time per inviting account, so its cap cannot be
         // raced from two workspaces.
         await tx.query("SELECT pg_advisory_xact_lock(hashtext($1::text))", [
@@ -148,6 +158,10 @@ export function registerInvitationRoutes(app: FastifyInstance, ctx: Ctx): void {
     if (outcome.kind === "full") {
       request.reason = "member_limit";
       return reply.code(409).send({ error: "member_limit" });
+    }
+    if (outcome.kind === "already_member") {
+      request.reason = "already_member";
+      return reply.code(409).send({ error: "already_member" });
     }
     if (outcome.kind === "duplicate") {
       request.reason = "already_invited";

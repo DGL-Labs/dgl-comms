@@ -89,6 +89,37 @@ describe("invitations", () => {
     }
   }
 
+  it("refuses with 409 to invite a member, using no email, cap slot or member slot", async () => {
+    await addMember(t, owner, ws, member);
+    const tokenBefore = tokenFor(member.email);
+    const slots = async () =>
+      (
+        await t.pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM audit_log
+            WHERE workspace_id = $1 AND action = 'invite.create'`,
+          [ws],
+        )
+      ).rows[0]?.n;
+    const slotsBefore = await slots();
+    const res = await invite(owner, member.email, "admin");
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: "already_member" });
+    expect(tokenFor(member.email)).toBe(tokenBefore);
+    expect(await slots()).toBe(slotsBefore);
+    expect(await memberCount()).toBe(2);
+    const pending = await withContext(
+      t.pool,
+      { accountId: owner.accountId },
+      (tx) =>
+        tx.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM invitations
+            WHERE workspace_id = $1 AND used_at IS NULL`,
+          [ws],
+        ),
+    );
+    expect(pending.rows[0]?.n).toBe(0);
+  });
+
   it("sends the token by email only, in fixed text", async () => {
     const res = await invite(owner, invitee.email, "admin");
     expect(res.statusCode).toBe(201);

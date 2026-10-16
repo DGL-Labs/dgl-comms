@@ -16,7 +16,10 @@ BEGIN
     CREATE ROLE pingzo_keyresolver NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEROLE NOCREATEDB;
   END IF;
   -- Lets migration 0003 hand the function to pingzo_keyresolver
-  -- (ALTER FUNCTION ... OWNER TO needs membership in the new owner).
+  -- (ALTER FUNCTION ... OWNER TO needs membership in the new owner). Only
+  -- until then: a superuser step after the migrations runs
+  -- REVOKE pingzo_keyresolver FROM pingzo_owner, because the grant below is
+  -- the superuser's own and pingzo_owner cannot revoke it.
   GRANT pingzo_keyresolver TO pingzo_owner;
   -- The owner role owns the database, so it can create the citext extension
   -- (a trusted extension) and own everything in the public schema.

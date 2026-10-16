@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { deleteAccount } from "../../src/account.ts";
-import { withTx } from "../../src/db.ts";
+import { withContext, withTx } from "../../src/db.ts";
 import {
   addMember,
   api,
@@ -250,6 +250,35 @@ describe("T-DELETE-CASCADE", () => {
       expect(await memberIds(owner, shared)).toEqual(
         [owner.accountId, third.accountId].sort(),
       );
+    });
+
+    it("keeps a pending invitation of a deleted admin, with invited_by NULL", async () => {
+      const owner = await makeUser(t);
+      const admin = await makeUser(t);
+      const ws = await createWorkspace(t, owner, "Invites");
+      await addMember(t, owner, ws, admin, "admin");
+      const sent = await api(
+        t,
+        admin,
+        "POST",
+        `/v1/workspaces/${ws}/invitations`,
+        { email: uniqueEmail(), role: "member" },
+      );
+      expect(sent.statusCode).toBe(201);
+      const inviteId = sent.json<{ id: string }>().id;
+
+      expect((await del(admin)).statusCode).toBe(204);
+      const row = await withContext(
+        t.pool,
+        { accountId: owner.accountId },
+        (tx) =>
+          tx.query<{ invited_by: string | null }>(
+            "SELECT invited_by FROM invitations WHERE id = $1",
+            [inviteId],
+          ),
+      );
+      expect(row.rows).toHaveLength(1);
+      expect(row.rows[0]?.invited_by).toBeNull();
     });
 
     it("never transfers ownership by itself", async () => {

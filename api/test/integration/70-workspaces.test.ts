@@ -366,6 +366,25 @@ describe("workspaces", () => {
       expect(bad.statusCode).toBe(400);
       expect((await roles(id)).get(owner.accountId)).toBe("owner");
     });
+
+    it("refuses with 409 when the target already owns 3 workspaces", async () => {
+      const id = await team();
+      for (let i = 0; i < 3; i += 1) {
+        await createWorkspace(t, admin, `Admin's ${i}`);
+      }
+      const res = await api(t, owner, "POST", `/v1/workspaces/${id}/transfer`, {
+        accountId: admin.accountId,
+      });
+      expect(res.statusCode).toBe(409);
+      const roleMap = await roles(id);
+      expect(roleMap.get(owner.accountId)).toBe("owner");
+      expect(roleMap.get(admin.accountId)).toBe("admin");
+      // A target with room still works.
+      const ok = await api(t, owner, "POST", `/v1/workspaces/${id}/transfer`, {
+        accountId: member.accountId,
+      });
+      expect(ok.statusCode).toBe(200);
+    });
   });
 
   describe("T-WS-CAPS", () => {

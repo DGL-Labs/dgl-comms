@@ -114,6 +114,17 @@ describe("T-ROLE", () => {
       expect(objects.rows[0]?.n).toBe(1);
     });
 
+    it("has no member: neither pingzo_app nor pingzo_owner can become it", async () => {
+      const res = await pool.query<{ member: string }>(
+        `SELECT m.rolname AS member
+           FROM pg_auth_members am
+           JOIN pg_roles r ON r.oid = am.roleid
+           JOIN pg_roles m ON m.oid = am.member
+          WHERE r.rolname = 'pingzo_keyresolver'`,
+      );
+      expect(res.rows).toEqual([]);
+    });
+
     it("has only the grants it needs", async () => {
       const res = await pool.query<{ ok: boolean }>(
         `SELECT has_table_privilege('pingzo_keyresolver', 'topic_keys', 'SELECT')

@@ -69,6 +69,12 @@ export default async function setup({
   await runMigrations(
     urlFor(superUrl, database, "pingzo_owner", ownerPassword),
   );
+  // The superuser step of the role bootstrap, after the migrations: pingzo_owner
+  // keeps no membership of pingzo_keyresolver.
+  await asSuperuser(
+    urlFor(superUrl, database),
+    "REVOKE pingzo_keyresolver FROM pingzo_owner",
+  );
 
   // Fail fast if the app role is ever privileged (T-ROLE repeats this check).
   const appUrl = urlFor(superUrl, database, "pingzo_app", appPassword);

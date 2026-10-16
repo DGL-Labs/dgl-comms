@@ -470,6 +470,18 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
         if ((await memberRole(tx, id, targetId)) === null) {
           return { kind: "not_found" as const };
         }
+        // The target's cap, as for create: lock its account row so a create
+        // and a transfer cannot both pass the count.
+        await tx.query("SELECT id FROM accounts WHERE id = $1 FOR UPDATE", [
+          targetId,
+        ]);
+        const owned = await tx.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM workspaces WHERE owner_id = $1",
+          [targetId],
+        );
+        if ((first(owned.rows)?.n ?? 0) >= MAX_OWNED_WORKSPACES) {
+          return { kind: "too_many" as const };
+        }
         // One owner at a time: demote first, then promote.
         await tx.query(
           `UPDATE members SET role = 'admin'
@@ -497,6 +509,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
     );
     if (outcome.kind === "not_found" || outcome.kind === "forbidden") {
       return deny(request, reply, outcome);
+    }
+    if (outcome.kind === "too_many") {
+      request.reason = "workspace_limit";
+      return reply.code(409).send({ error: "workspace_limit" });
     }
     if (outcome.kind !== "done") return badRequest(request, reply);
     request.reason = "workspace_transferred";
