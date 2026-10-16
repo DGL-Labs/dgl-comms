@@ -1,0 +1,34 @@
+{
+  "name": "pingzo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pingzo API (C-1b: accounts, verification, sessions, deletion, login throttle)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "eslint api && prettier --check api",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config api/vitest.config.ts",
+    "test:integration": "vitest run --config api/vitest.integration.config.ts",
+    "migrate": "node api/src/migrate.ts",
+    "start": "node api/src/server.ts"
+  },
+  "dependencies": {
+    "fastify": "5.2.1",
+    "jose": "5.9.6",
+    "pg": "8.13.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.17.0",
+    "@types/node": "22.10.2",
+    "@types/pg": "8.11.10",
+    "eslint": "9.17.0",
+    "prettier": "3.4.2",
+    "typescript": "5.7.2",
+    "typescript-eslint": "8.18.2",
+    "vitest": "2.1.8"
+  }
+}
