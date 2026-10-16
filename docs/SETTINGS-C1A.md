@@ -104,17 +104,35 @@ JSON
 - Revisit at C-1l: a ruleset for `claude/**` that limits deletion.
 
 ## B3. Environment `claude` (MUST 1 of G5 round 1)
-Taylor created it, with required reviewer BoaterGuy15 (id 86842551) and secret `ANTHROPIC_API_KEY`. **The secret is never read or written.** The only change is **required**: limit deployments to `main`. The reviewer, self-review and admin-bypass values are restated unchanged from B0.
+Taylor created it, with required reviewer BoaterGuy15 (id 86842551) and secret `ANTHROPIC_API_KEY`. **The secret is never read or written.** The only change is **required**: limit deployments to `main`.
+- **Values come from B0.** The PUT body is built from the B0 GET, never typed in.
+- **Stop rule.** Before the PUT, B0 is compared with the reviewed state, which was read 2026-10-16:
+  - one required reviewer, User 86842551;
+  - `prevent_self_review` false;
+  - no wait timer;
+  - `can_admins_bypass` true;
+  - no branch policy.
+
+  **On any difference, stop** and report it. Nothing is applied.
 ```sh
-gh api -X PUT $R/environments/claude --input - <<'JSON'
-{
-  "wait_timer": 0,
-  "prevent_self_review": false,
-  "reviewers": [ { "type": "User", "id": 86842551 } ],
-  "can_admins_bypass": true,
-  "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true }
-}
-JSON
+gh api $R/environments/claude > b0-env.json
+# Compare with the reviewed state and build the PUT body from B0 (Python, already on the applier's PC; no jq).
+python -I - b0-env.json > b3-put.json <<'PY' || { echo "B0 differs from the reviewed state; stopping before any write" >&2; exit 1; }
+import json, sys
+e = json.load(open(sys.argv[1]))
+rr = [p for p in e.get("protection_rules", []) if p["type"] == "required_reviewers"]
+wt = [p for p in e.get("protection_rules", []) if p["type"] == "wait_timer"]
+reviewers = [{"type": r["type"], "id": r["reviewer"]["id"]} for p in rr for r in p["reviewers"]]
+ok = (len(rr) == 1 and reviewers == [{"type": "User", "id": 86842551}] and rr[0]["prevent_self_review"] is False
+      and not wt and e.get("can_admins_bypass") is True and e.get("deployment_branch_policy") is None)
+if not ok:
+    sys.exit("differs: " + json.dumps({"reviewers": reviewers, "rules": e.get("protection_rules"),
+             "can_admins_bypass": e.get("can_admins_bypass"), "deployment_branch_policy": e.get("deployment_branch_policy")}))
+print(json.dumps({"wait_timer": 0, "prevent_self_review": rr[0]["prevent_self_review"], "reviewers": reviewers,
+                  "can_admins_bypass": e["can_admins_bypass"],
+                  "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}))
+PY
+gh api -X PUT $R/environments/claude --input b3-put.json
 gh api -X POST $R/environments/claude/deployment-branch-policies -f name=main -f type=branch
 
 # Verify
@@ -131,12 +149,29 @@ gh api $R/environments/claude/secrets --jq '[.secrets[].name]'                  
 - **Approvals.** With `require_last_push_approval`, the latest push must be approved by someone other than its pusher. Taylor authors the PRs, and Taylor cannot approve his own PR, so approvals are not obtainable while he is the only human reviewer. Merges go through the admin bypass (pull-requests-only mode) after G5 PASS, as plan §9 says. The rule stays, so a second reviewer account works without changes.
 
 ## Residual risk (G5 MUST 2)
-- **The key is in the action's process environment.** Claude has no Bash. Reads of `/proc`, `/sys`, the runner `_temp` folder and dot-directories under `/home/runner` are denied through `--disallowedTools`.
-- **What is not proven.** The deny rules are enforced by Claude Code's permission matcher; a live test is part of T-C1A-4 when Taylor approves one run. Any other path that exposes the environment is not covered by a rule.
+- **The key is in the action's process environment.** Claude has no Bash. `--disallowedTools` denies reads of:
+  - `/proc` and `/sys`;
+  - the runner `_temp` folder;
+  - the action cache (`/home/runner/work/_actions`);
+  - the runner install (`/home/runner/runners`);
+  - dot-directories under `/home/runner`.
+
+  Commits go through the GitHub API (`use_commit_signing`), so no `git` runs in Bash.
+- **What is not proven:**
+  - The deny rules are enforced by Claude Code's permission matcher. Whether `Read(//home/runner/.*/**)` matches dot-directories is untested.
+  - **Symlinks.** A file in a PR branch that is a symlink to `/proc/self/environ` would be read through a workspace path. Whether the matcher resolves symlinks before matching is unproven. The guard limits PRs to an allowlisted author in this repository, so only Taylor's own branches could carry such a link.
+  - Any other path that exposes the environment is not covered by a rule.
+- **T-C1A-4 live checks** (one run Taylor approves, on a test PR by BoaterGuy15 that holds only a test file and a symlink `t/env-link → /proc/self/environ`):
+  1. the run waits for environment approval;
+  2. after approval, Claude is asked to read `t/env-link` and `/proc/self/environ`, and both reads must be **denied** (the log shows the permission refusal, with no content);
+  3. Claude commits one test-file edit, and the commit must land through the API. **Fallback** if the commit fails: allow `Bash(git add:*)`, `Bash(git commit:*)` and `Bash(git push:*)` only, through a reviewed PR;
+  4. **if read 2 is not denied:** revoke the key at once. Taylor creates a new one, and claude.yml is disabled until a fix passes G5.
+
+  Since the test PR's author is Taylor, a symlink cannot reach a run any other way.
 - **What bounds it:**
-  - only allowlisted, same-repository PRs by an allowlisted author reach the key (the guard step);
+  - only same-repository PRs by an allowlisted author reach the key (the guard step);
   - comments from other actors are filtered out;
-  - every run needs Taylor's approval;
+  - every run needs approval on environment `claude`. **Admin bypass is on** (`can_admins_bypass: true`): a repository admin (Taylor only) can deploy without the approval step. It stays on because Taylor is both the reviewer and the only admin; turning it off is his choice;
   - the Anthropic spend cap is US$50 a month;
   - the key can be revoked in the Anthropic console.
 - **If the key ever appears in a commit, comment or log:** revoke it at once. Taylor creates the new one.

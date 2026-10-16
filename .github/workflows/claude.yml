@@ -17,7 +17,9 @@ concurrency:
 
 jobs:
   claude:
-    # Allowlist (E4: BoaterGuy15 only; Taylor may add accounts). Pull-request comments only.
+    # ALLOWLIST (E4: BoaterGuy15 only; Taylor may add accounts). It appears in THREE places in this file, which must
+    # stay identical: this `if:`, the guard step's `case`, and `include_comments_by_actor`. Change all three in one PR.
+    # Pull-request comments only.
     if: >-
       contains(fromJSON('["BoaterGuy15"]'), github.actor) &&
       contains(github.event.comment.body, '@claude') &&
@@ -42,7 +44,7 @@ jobs:
           read -r head author < <(gh api "repos/${REPO}/pulls/${PR}" --jq '[.head.repo.full_name // "", .user.login] | @tsv')
           if [ "$head" != "$REPO" ]; then echo "Refused: PR head is '${head}', not ${REPO}." >&2; exit 1; fi
           case "$author" in
-            BoaterGuy15) ;;
+            BoaterGuy15) ;;   # ALLOWLIST: keep identical to the job `if:` and include_comments_by_actor
             *) echo "Refused: PR author '${author}' is not on the allowlist." >&2; exit 1 ;;
           esac
           echo "Guard passed: same-repository PR by ${author}."
@@ -55,11 +57,14 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
           trigger_phrase: "@claude"
-          include_comments_by_actor: "BoaterGuy15"
-          # No Bash; reads of process environments (/proc, /sys), runner temp files and dot-directories are denied
-          # (G5 round 1, MUST 2). Residual risk: SETTINGS-C1A.md "Residual risk".
+          include_comments_by_actor: "BoaterGuy15"   # ALLOWLIST: keep identical to the job `if:` and the guard
+          # Commits go through the GitHub API (the action's file_ops tool), not `git` in Bash, so the Bash deny below
+          # does not block committing (checked in src/modes/tag/index.ts at the pinned sha; G5 round 2, item 2).
+          use_commit_signing: "true"
+          # No Bash; reads of process environments (/proc, /sys), runner temp, action and runner install folders,
+          # and dot-directories are denied (G5 rounds 1-2). Residual risk: SETTINGS-C1A.md "Residual risk".
           claude_args: >-
             --model claude-sonnet-5-5
             --max-turns 30
             --allowedTools "Read,Edit,Write,Glob,Grep"
-            --disallowedTools "Bash,Read(//proc/**),Read(//sys/**),Read(//home/runner/work/_temp/**),Read(//home/runner/.*/**),Grep(//proc/**),Grep(//home/runner/work/_temp/**),Glob(//proc/**)"
+            --disallowedTools "Bash,Read(//proc/**),Read(//sys/**),Read(//home/runner/work/_temp/**),Read(//home/runner/work/_actions/**),Read(//home/runner/runners/**),Read(//home/runner/.*/**),Grep(//proc/**),Grep(//home/runner/work/_temp/**),Grep(//home/runner/work/_actions/**),Grep(//home/runner/runners/**),Glob(//proc/**)"
