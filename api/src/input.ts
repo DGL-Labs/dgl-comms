@@ -1,6 +1,12 @@
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const CONTROL = /[\u0000-\u001f\u007f]/;
+
+function hasControl(s: string): boolean {
+  return [...s].some((c) => {
+    const code = c.charCodeAt(0);
+    return code < 0x20 || code === 0x7f;
+  });
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -19,6 +25,6 @@ export function isUuid(value: unknown): value is string {
 export function parseName(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const name = value.trim();
-  if (name.length < 1 || name.length > 60 || CONTROL.test(name)) return null;
+  if (name.length < 1 || name.length > 60 || hasControl(name)) return null;
   return name;
 }

@@ -15,4 +15,4 @@ TODO: the original content of `docs/KNOWN-GAPS-C1B.md` must be restored here ver
 
 ## C-1c
 
-None recorded yet. The reviewer should add any gaps found at G5.
+None known. The reviewer should add any gaps found at G5.
