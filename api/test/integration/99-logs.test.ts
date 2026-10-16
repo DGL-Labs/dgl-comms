@@ -2,8 +2,12 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
 import {
+  addMember,
+  api,
   bearer,
+  createWorkspace,
   makeApp,
+  makeUser,
   redeem,
   registerSecret,
   signupAndVerify,
@@ -66,6 +70,18 @@ describe("T-LOGS", () => {
       url: "/v1/account",
       headers: { ...extra, ...bearer(tokens.accessToken) },
     });
+    // A workspace and an invitation: the invitee's email and the invite token
+    // must stay out of the log too.
+    const host = await makeUser(t);
+    const guest = await makeUser(t);
+    const workspaceId = await createWorkspace(t, host, "Log probe");
+    await addMember(t, host, workspaceId, guest);
+    await api(
+      t,
+      guest,
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/members/${guest.accountId}`,
+    );
     await t.app.inject({ method: "GET", url: "/healthz", headers: extra });
     await t.app.inject({
       method: "POST",

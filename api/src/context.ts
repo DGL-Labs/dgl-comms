@@ -28,6 +28,9 @@ export interface Ctx {
   blocklist: ReadonlySet<string>;
   key: JwtKey;
   logger: Logger;
+  // Test hook: skips the permission check, to prove that row-level security
+  // holds by itself. Always false outside tests.
+  skipPermissionChecks: boolean;
   // Wraps the onSessionRevoked hook; ignores empty lists and hook errors.
   sessionsRevoked(sessionIds: string[]): void;
 }
