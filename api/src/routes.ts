@@ -3,7 +3,7 @@ import { deleteAccount } from "./account.ts";
 import { isBlockedDomain } from "./blocklist.ts";
 import { clientIp } from "./context.ts";
 import type { Ctx } from "./context.ts";
-import { first, withTx } from "./db.ts";
+import { first, withContext, withTx } from "./db.ts";
 import { requireSession } from "./guard.ts";
 import { isRecord, normalizeEmail } from "./input.ts";
 import { createMagicLink } from "./magic.ts";
@@ -399,10 +399,33 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
       allowUnverified: false,
     });
     if (session === null) return reply;
-    const ended = await withTx(ctx.pool, (tx) =>
-      deleteAccount(tx, session.accountId),
+    // ?confirm=true is needed only to delete solely-owned workspaces along
+    // with the account. A shared workspace refuses the delete either way.
+    const query = request.query;
+    const confirm = isRecord(query) && query.confirm === "true";
+    const outcome = await withContext(
+      ctx.pool,
+      { accountId: session.accountId },
+      (tx) =>
+        deleteAccount(tx, session.accountId, {
+          confirm,
+          now: ctx.clock.now(),
+        }),
     );
-    ctx.sessionsRevoked(ended);
+    if (outcome.kind === "shared") {
+      request.reason = "account_delete_shared";
+      return reply.code(409).send({ owned_workspaces: outcome.workspaces });
+    }
+    if (outcome.kind === "confirm") {
+      request.reason = "account_delete_confirm";
+      return reply.code(409).send({
+        owned_workspaces: outcome.workspaces.map((w) => ({
+          id: w.id,
+          action: "delete",
+        })),
+      });
+    }
+    ctx.sessionsRevoked(outcome.endedSessions);
     request.reason = "account_deleted";
     return reply.code(204).send();
   });
