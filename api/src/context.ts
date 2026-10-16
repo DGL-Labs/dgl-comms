@@ -4,6 +4,7 @@ import type { Config } from "./config.ts";
 import type { EmailSender } from "./email.ts";
 import { resolveClientIp } from "./ip.ts";
 import type { Logger } from "./log.ts";
+import type { JwtKey } from "./sessions.ts";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -25,7 +26,7 @@ export interface Ctx {
   sender: EmailSender;
   clock: Clock;
   blocklist: ReadonlySet<string>;
-  key: Uint8Array;
+  key: JwtKey;
   logger: Logger;
   // Wraps the onSessionRevoked hook; ignores empty lists and hook errors.
   sessionsRevoked(sessionIds: string[]): void;

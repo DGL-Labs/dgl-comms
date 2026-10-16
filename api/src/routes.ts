@@ -300,10 +300,17 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
         id: string;
         account_id: string;
         device_id: string | null;
+        chain_started_at: Date;
       }>(
-        `UPDATE sessions SET revoked_at = $2
-          WHERE refresh_hash = $1 AND revoked_at IS NULL AND expires_at > $2
-          RETURNING id, account_id, device_id`,
+        // Only an active account may refresh, and a chain ends 90 days after
+        // its first session, however often it is rotated.
+        `UPDATE sessions s SET revoked_at = $2
+           FROM accounts a
+          WHERE s.refresh_hash = $1 AND s.revoked_at IS NULL
+            AND s.expires_at > $2
+            AND s.chain_started_at + interval '90 days' >= $2
+            AND a.id = s.account_id AND a.status = 'active'
+          RETURNING s.id, s.account_id, s.device_id, s.chain_started_at`,
         [hash, now],
       );
       const old = first(rotated.rows);
@@ -314,6 +321,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
           old.account_id,
           now,
           old.device_id,
+          old.chain_started_at,
         );
         return {
           kind: "ok" as const,

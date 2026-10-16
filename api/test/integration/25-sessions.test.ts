@@ -94,6 +94,36 @@ describe("sessions", () => {
     expect((await refresh(first.refreshToken)).statusCode).toBe(401);
   });
 
+  it("refuses a refresh when the account is not active", async () => {
+    const first = await signupAndVerify(t, uniqueEmail());
+    await t.pool.query("UPDATE accounts SET status = 'suspended'");
+    expect((await refresh(first.refreshToken)).statusCode).toBe(401);
+    const live = await t.pool.query(
+      "SELECT 1 FROM sessions WHERE revoked_at IS NULL",
+    );
+    expect(live.rowCount).toBe(1);
+  });
+
+  it("ends a refresh chain 90 days after it began", async () => {
+    const day = 24 * 60 * 60 * 1000;
+    let token = (await signupAndVerify(t, uniqueEmail())).refreshToken;
+    // Each step is under the 30-day session life, so only the 90-day limit
+    // can stop the chain: days 29, 58 and 87 work, day 116 does not.
+    for (let i = 1; i <= 3; i++) {
+      t.clock.advance(29 * day);
+      const res = await refresh(token);
+      expect(res.statusCode).toBe(200);
+      token = res.json<{ refresh_token: string }>().refresh_token;
+      registerSecret(token);
+    }
+    const chains = await t.pool.query(
+      "SELECT DISTINCT chain_started_at FROM sessions",
+    );
+    expect(chains.rowCount).toBe(1);
+    t.clock.advance(29 * day);
+    expect((await refresh(token)).statusCode).toBe(401);
+  });
+
   it("logout revokes this session only; logout-all revokes all", async () => {
     const email = uniqueEmail();
     const one = await signupAndVerify(t, email);

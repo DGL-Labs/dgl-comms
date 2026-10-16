@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { SignJWT, decodeJwt } from "jose";
 import { createSession } from "../../src/sessions.ts";
 import {
   bearer,
@@ -7,7 +8,7 @@ import {
   signupAndVerify,
   uniqueEmail,
 } from "./harness.ts";
-import type { TestApp } from "./harness.ts";
+import type { TestApp, Tokens } from "./harness.ts";
 
 // T-AUTH-DENY
 describe("T-AUTH-DENY", () => {
@@ -74,6 +75,97 @@ describe("T-AUTH-DENY", () => {
     );
   });
 
+  describe("forged tokens", () => {
+    interface Forge {
+      alg?: "HS256" | "HS512";
+      secret?: Uint8Array;
+      iss?: string | null;
+      aud?: string | null;
+      kid?: string | null;
+      sid?: string | null;
+    }
+
+    // A token for a real account and session, with one thing changed.
+    async function forge(tokens: Tokens, opts: Forge = {}): Promise<string> {
+      const claims = decodeJwt(tokens.accessToken);
+      const iat = Math.floor(t.clock.now().getTime() / 1000);
+      const payload = opts.sid === null ? {} : { sid: opts.sid ?? claims.sid };
+      const kid = opts.kid ?? t.config.jwtKid;
+      const header = { alg: opts.alg ?? "HS256", ...(kid ? { kid } : {}) };
+      const jwt = new SignJWT(payload)
+        .setProtectedHeader(opts.kid === null ? { alg: header.alg } : header)
+        .setSubject(tokens.accountId)
+        .setIssuedAt(iat)
+        .setExpirationTime(iat + 900);
+      if (opts.iss !== null) jwt.setIssuer(opts.iss ?? "pingzo-api");
+      if (opts.aud !== null) jwt.setAudience(opts.aud ?? "pingzo-app");
+      return jwt.sign(opts.secret ?? new TextEncoder().encode(t.config.jwtKey));
+    }
+
+    const encode = (value: object) =>
+      Buffer.from(JSON.stringify(value)).toString("base64url");
+
+    it("accepts a correctly forged token (positive control)", async () => {
+      const tokens = await signupAndVerify(t, "a@example.test");
+      const out = await t.app.inject({
+        method: "POST",
+        url: "/v1/auth/logout",
+        headers: bearer(await forge(tokens)),
+      });
+      expect(out.statusCode).toBe(204);
+    });
+
+    it("gives 401 for alg none, other algs, keys, claims and kid", async () => {
+      const tokens = await signupAndVerify(t, "a@example.test");
+      const claims = decodeJwt(tokens.accessToken);
+      const iat = Math.floor(t.clock.now().getTime() / 1000);
+      const noneHeader = encode({ alg: "none", kid: t.config.jwtKid });
+      const nonePayload = encode({
+        sub: tokens.accountId,
+        sid: claims.sid,
+        iss: "pingzo-api",
+        aud: "pingzo-app",
+        iat,
+        exp: iat + 900,
+      });
+      const algNone = `${noneHeader}.${nonePayload}.`;
+      const otherKey = new TextEncoder().encode(
+        "a-different-key-a-different-key-0000",
+      );
+      const forged: Record<string, string> = {
+        "alg none": algNone,
+        "HS512 with the same key": await forge(tokens, { alg: "HS512" }),
+        "different key": await forge(tokens, { secret: otherKey }),
+        "wrong iss": await forge(tokens, { iss: "someone-else" }),
+        "no iss": await forge(tokens, { iss: null }),
+        "wrong aud": await forge(tokens, { aud: "someone-else" }),
+        "no aud": await forge(tokens, { aud: null }),
+        "wrong kid": await forge(tokens, { kid: "k-other" }),
+        "no kid": await forge(tokens, { kid: null }),
+        "no sid": await forge(tokens, { sid: null }),
+      };
+      for (const [name, token] of Object.entries(forged)) {
+        const res = await del(bearer(token));
+        expect(res.statusCode, name).toBe(401);
+      }
+      // None of them touched the real session.
+      const out = await t.app.inject({
+        method: "POST",
+        url: "/v1/auth/logout-all",
+        headers: bearer(tokens.accessToken),
+      });
+      expect(out.statusCode).toBe(204);
+    });
+
+    it("gives 401 for a token of a deleted account", async () => {
+      const tokens = await signupAndVerify(t, "a@example.test");
+      const valid = await forge(tokens);
+      expect((await del(bearer(tokens.accessToken))).statusCode).toBe(204);
+      expect((await del(bearer(valid))).statusCode).toBe(401);
+      expect((await del(bearer(tokens.accessToken))).statusCode).toBe(401);
+    });
+  });
+
   it("gives 403 to an unverified account, except on auth routes", async () => {
     const res = await signup(t, "a@example.test");
     expect(res.statusCode).toBe(202);
@@ -81,7 +173,10 @@ describe("T-AUTH-DENY", () => {
       "SELECT id FROM accounts WHERE email = 'a@example.test'",
     );
     const accountId = (account.rows[0] as { id: string }).id;
-    const key = new TextEncoder().encode(t.config.jwtKey);
+    const key = {
+      secret: new TextEncoder().encode(t.config.jwtKey),
+      kid: t.config.jwtKid,
+    };
     const issued = await createSession(t.pool, key, accountId, t.clock.now());
     const headers = bearer(issued.accessToken);
     expect((await del(headers)).statusCode).toBe(403);

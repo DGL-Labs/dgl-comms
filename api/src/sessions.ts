@@ -5,6 +5,14 @@ import { hashToken, newToken } from "./tokens.ts";
 
 export const ACCESS_TTL_SECONDS = 15 * 60;
 export const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const JWT_ISSUER = "pingzo-api";
+export const JWT_AUDIENCE = "pingzo-app";
+
+// The HS256 secret and the key id that goes in the token header.
+export interface JwtKey {
+  secret: Uint8Array;
+  kid: string;
+}
 
 export interface IssuedSession {
   sessionId: string;
@@ -14,31 +22,37 @@ export interface IssuedSession {
 }
 
 export function signAccessToken(
-  key: Uint8Array,
+  key: JwtKey,
   accountId: string,
   sessionId: string,
   now: Date,
 ): Promise<string> {
   const iat = Math.floor(now.getTime() / 1000);
   return new SignJWT({ sid: sessionId })
-    .setProtectedHeader({ alg: "HS256" })
+    .setProtectedHeader({ alg: "HS256", kid: key.kid })
+    .setIssuer(JWT_ISSUER)
+    .setAudience(JWT_AUDIENCE)
     .setSubject(accountId)
     .setIssuedAt(iat)
     .setExpirationTime(iat + ACCESS_TTL_SECONDS)
-    .sign(key);
+    .sign(key.secret);
 }
 
 // Returns the account and session ids from a valid access token, else null.
+// The algorithm, issuer, audience and key id must all match.
 export async function readAccessToken(
-  key: Uint8Array,
+  key: JwtKey,
   token: string,
   now: Date,
 ): Promise<{ accountId: string; sessionId: string } | null> {
   try {
-    const { payload } = await jwtVerify(token, key, {
+    const { payload, protectedHeader } = await jwtVerify(token, key.secret, {
       algorithms: ["HS256"],
+      issuer: JWT_ISSUER,
+      audience: JWT_AUDIENCE,
       currentDate: now,
     });
+    if (protectedHeader.kid !== key.kid) return null;
     const sid = payload.sid;
     if (typeof payload.sub !== "string" || typeof sid !== "string") return null;
     return { accountId: payload.sub, sessionId: sid };
@@ -47,19 +61,29 @@ export async function readAccessToken(
   }
 }
 
+// A rotation passes the first session's chainStartedAt, so the 90-day limit
+// counts from the sign-in and not from the last refresh.
 export async function createSession(
   db: Db,
-  key: Uint8Array,
+  key: JwtKey,
   accountId: string,
   now: Date,
   deviceId: string | null = null,
+  chainStartedAt: Date = now,
 ): Promise<IssuedSession> {
   const refreshToken = newToken();
   const expiresAt = new Date(now.getTime() + REFRESH_TTL_MS);
   const result = await db.query<{ id: string }>(
-    `INSERT INTO sessions (account_id, refresh_hash, device_id, expires_at, created_at)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [accountId, hashToken(refreshToken), deviceId, expiresAt, now],
+    `INSERT INTO sessions (account_id, refresh_hash, device_id, expires_at, created_at, chain_started_at)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+    [
+      accountId,
+      hashToken(refreshToken),
+      deviceId,
+      expiresAt,
+      now,
+      chainStartedAt,
+    ],
   );
   const row = first(result.rows);
   if (row === undefined) throw new Error("session insert returned no row");

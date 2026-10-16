@@ -33,7 +33,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     sender: deps.sender,
     clock: deps.clock ?? systemClock,
     blocklist: deps.blocklist ?? loadBlocklist(deps.config.blocklistPath),
-    key: new TextEncoder().encode(deps.config.jwtKey),
+    key: {
+      secret: new TextEncoder().encode(deps.config.jwtKey),
+      kid: deps.config.jwtKid,
+    },
     logger,
     sessionsRevoked(sessionIds) {
       if (sessionIds.length === 0) return;
