@@ -1,8 +1,9 @@
 import type { Db } from "./db.ts";
 
 export const WINDOW_MS = 15 * 60 * 1000;
-export const ACCOUNT_LIMIT = 5;
 export const IP_LIMIT = 20;
+// Login links sent per account in one window.
+export const LOGIN_LINK_LIMIT = 3;
 const MAX_ROWS = 1000;
 
 // Window maths. Given failure times (ms), returns 0 if another attempt is
@@ -23,53 +24,54 @@ export function retryAfterSeconds(
   return Math.max(1, Math.ceil((oldestThatMatters + windowMs - nowMs) / 1000));
 }
 
-async function failureTimes(
+// Takes a transaction-scoped lock for one key (an IP or an account), so a
+// parallel burst cannot pass a limit between the check and the record.
+// Callers take the IP lock first and the account lock second.
+export async function lockKey(
   db: Db,
-  column: "account_id" | "ip",
+  kind: "ip" | "account",
   value: string,
-  now: Date,
-): Promise<number[]> {
+): Promise<void> {
+  await db.query("SELECT pg_advisory_xact_lock(hashtext($1::text))", [
+    `throttle:${kind}:${value}`,
+  ]);
+}
+
+async function attemptTimes(db: Db, ip: string, now: Date): Promise<number[]> {
   const since = new Date(now.getTime() - WINDOW_MS);
   const result = await db.query<{ created_at: Date }>(
     `SELECT created_at FROM login_failures
-      WHERE ${column} = $1 AND created_at > $2
+      WHERE ip = $1 AND created_at > $2
       ORDER BY created_at ASC LIMIT ${MAX_ROWS}`,
-    [value, since],
+    [ip, since],
   );
   return result.rows.map((row) => row.created_at.getTime());
 }
 
-// Returns 0 if the attempt may go ahead, else the Retry-After seconds.
+// Returns 0 if the attempt may go ahead, else the Retry-After seconds. Limits
+// are per IP only, so a 429 says nothing about any account. Call it after
+// lockKey(db, "ip", ip), in the same transaction as recordAttempt.
 export async function checkThrottle(
   db: Db,
   now: Date,
-  accountId: string | null,
   ip: string,
 ): Promise<number> {
-  const byIp = retryAfterSeconds(
-    await failureTimes(db, "ip", ip, now),
+  return retryAfterSeconds(
+    await attemptTimes(db, ip, now),
     now.getTime(),
     IP_LIMIT,
   );
-  const byAccount =
-    accountId === null
-      ? 0
-      : retryAfterSeconds(
-          await failureTimes(db, "account_id", accountId, now),
-          now.getTime(),
-          ACCOUNT_LIMIT,
-        );
-  return Math.max(byIp, byAccount);
 }
 
-export async function recordFailure(
+// Records one login request or failed redeem against the IP. The account is
+// never recorded.
+export async function recordAttempt(
   db: Db,
   now: Date,
-  accountId: string | null,
   ip: string,
 ): Promise<void> {
   await db.query(
-    "INSERT INTO login_failures (account_id, ip, created_at) VALUES ($1, $2, $3)",
-    [accountId, ip, now],
+    "INSERT INTO login_failures (account_id, ip, created_at) VALUES (NULL, $1, $2)",
+    [ip, now],
   );
 }

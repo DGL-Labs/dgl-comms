@@ -1,12 +1,8 @@
 import { describe, expect, it } from "vitest";
-import {
-  ACCOUNT_LIMIT,
-  IP_LIMIT,
-  WINDOW_MS,
-  retryAfterSeconds,
-} from "../../src/throttle.ts";
+import { IP_LIMIT, WINDOW_MS, retryAfterSeconds } from "../../src/throttle.ts";
 
 const NOW = 1_000_000_000_000;
+const ACCOUNT_LIMIT = 5;
 
 function failuresAt(count: number, ageMs: number): number[] {
   return Array.from({ length: count }, () => NOW - ageMs);

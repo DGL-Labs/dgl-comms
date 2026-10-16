@@ -8,7 +8,13 @@ import { requireSession } from "./guard.ts";
 import { createMagicLink } from "./magic.ts";
 import { createSession, revokeAllSessions, revokeSession } from "./sessions.ts";
 import type { IssuedSession } from "./sessions.ts";
-import { checkThrottle, recordFailure } from "./throttle.ts";
+import {
+  LOGIN_LINK_LIMIT,
+  WINDOW_MS,
+  checkThrottle,
+  lockKey,
+  recordAttempt,
+} from "./throttle.ts";
 import { hashToken } from "./tokens.ts";
 
 const SIGNUP_CAP = 5;
@@ -150,32 +156,59 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
 
     const ip = clientIp(ctx, request);
     const now = ctx.clock.now();
-    // Failures here are counted per IP only. Counting them per account would
-    // let a 429 tell an attacker that an unverified account exists.
-    const retryAfter = await checkThrottle(ctx.pool, now, null, ip);
-    if (retryAfter > 0) return tooManyAttempts(request, reply, retryAfter);
+    // Every request counts against the IP, known address or not, so the IP
+    // limit hits all addresses at the same request number. Nothing is counted
+    // per account, so a 429 never says anything about an account. The IP lock
+    // makes the check and the record one step.
+    const outcome = await withTx(ctx.pool, async (tx) => {
+      await lockKey(tx, "ip", ip);
+      const retryAfter = await checkThrottle(tx, now, ip);
+      if (retryAfter > 0) return { kind: "throttled" as const, retryAfter };
+      await recordAttempt(tx, now, ip);
 
-    const found = await ctx.pool.query<{
-      id: string;
-      verified_at: Date | null;
-      status: string;
-    }>("SELECT id, verified_at, status FROM accounts WHERE email = $1", [
-      email,
-    ]);
-    const account = first(found.rows);
-    if (
-      account === undefined ||
-      account.verified_at === null ||
-      account.status !== "active"
-    ) {
-      await recordFailure(ctx.pool, now, null, ip);
-      request.reason = "login_unknown_or_unverified";
-      return reply.code(202).send(ACCEPTED);
+      const found = await tx.query<{
+        id: string;
+        verified_at: Date | null;
+        status: string;
+      }>("SELECT id, verified_at, status FROM accounts WHERE email = $1", [
+        email,
+      ]);
+      const account = first(found.rows);
+      if (
+        account === undefined ||
+        account.verified_at === null ||
+        account.status !== "active"
+      ) {
+        return { kind: "none" as const };
+      }
+      // At most LOGIN_LINK_LIMIT links per account per window. Over the cap,
+      // the reply is the same but nothing is sent and no link is made.
+      await lockKey(tx, "account", account.id);
+      const sent = await tx.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM magic_links
+          WHERE account_id = $1 AND purpose = 'login' AND created_at > $2`,
+        [account.id, new Date(now.getTime() - WINDOW_MS)],
+      );
+      if (Number(first(sent.rows)?.n ?? "0") >= LOGIN_LINK_LIMIT) {
+        return { kind: "capped" as const, accountId: account.id };
+      }
+      const token = await createMagicLink(tx, account.id, "login", now);
+      return { kind: "sent" as const, accountId: account.id, token };
+    });
+
+    if (outcome.kind === "throttled") {
+      return tooManyAttempts(request, reply, outcome.retryAfter);
     }
-    request.accountId = account.id;
-    const token = await createMagicLink(ctx.pool, account.id, "login", now);
-    await ctx.sender.send({ to: email, kind: "login", token });
-    request.reason = "login_link_sent";
+    if (outcome.kind === "sent") {
+      request.accountId = outcome.accountId;
+      await ctx.sender.send({ to: email, kind: "login", token: outcome.token });
+      request.reason = "login_link_sent";
+    } else if (outcome.kind === "capped") {
+      request.accountId = outcome.accountId;
+      request.reason = "login_link_capped";
+    } else {
+      request.reason = "login_unknown_or_unverified";
+    }
     return reply.code(202).send(ACCEPTED);
   });
 
@@ -194,16 +227,14 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
     const ip = clientIp(ctx, request);
     const now = ctx.clock.now();
 
-    // Attribute failures to the link's account when the link is known.
-    const known = await ctx.pool.query<{ account_id: string }>(
-      "SELECT account_id FROM magic_links WHERE token_hash = $1",
-      [hash],
-    );
-    const knownAccountId = first(known.rows)?.account_id ?? null;
-    const retryAfter = await checkThrottle(ctx.pool, now, knownAccountId, ip);
-    if (retryAfter > 0) return tooManyAttempts(request, reply, retryAfter);
+    const outcome = await withTx(ctx.pool, async (tx) => {
+      // A failed redeem counts against the IP only, never against the
+      // account the link belongs to. The IP lock makes check and record one
+      // step.
+      await lockKey(tx, "ip", ip);
+      const retryAfter = await checkThrottle(tx, now, ip);
+      if (retryAfter > 0) return { kind: "throttled" as const, retryAfter };
 
-    const issued = await withTx(ctx.pool, async (tx) => {
       // Check and mark used in one statement: a link works once.
       const used = await tx.query<{ account_id: string; purpose: string }>(
         `UPDATE magic_links SET used_at = $2
@@ -212,31 +243,41 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
         [hash, now],
       );
       const link = first(used.rows);
-      if (link === undefined) return null;
-      const account =
-        link.purpose === "verify"
-          ? await tx.query<{ id: string }>(
-              `UPDATE accounts SET verified_at = COALESCE(verified_at, $2)
-                WHERE id = $1 AND status = 'active' RETURNING id`,
-              [link.account_id, now],
-            )
-          : await tx.query<{ id: string }>(
-              `SELECT id FROM accounts
-                WHERE id = $1 AND status = 'active' AND verified_at IS NOT NULL`,
-              [link.account_id],
-            );
-      if (first(account.rows) === undefined) return null;
-      request.accountId = link.account_id;
-      return createSession(tx, ctx.key, link.account_id, now);
+      let issued: IssuedSession | null = null;
+      if (link !== undefined) {
+        const account =
+          link.purpose === "verify"
+            ? await tx.query<{ id: string }>(
+                `UPDATE accounts SET verified_at = COALESCE(verified_at, $2)
+                  WHERE id = $1 AND status = 'active' RETURNING id`,
+                [link.account_id, now],
+              )
+            : await tx.query<{ id: string }>(
+                `SELECT id FROM accounts
+                  WHERE id = $1 AND status = 'active' AND verified_at IS NOT NULL`,
+                [link.account_id],
+              );
+        if (first(account.rows) !== undefined) {
+          request.accountId = link.account_id;
+          issued = await createSession(tx, ctx.key, link.account_id, now);
+        }
+      }
+      if (issued === null) {
+        await recordAttempt(tx, now, ip);
+        return { kind: "invalid" as const };
+      }
+      return { kind: "ok" as const, issued };
     });
 
-    if (issued === null) {
-      await recordFailure(ctx.pool, now, knownAccountId, ip);
+    if (outcome.kind === "throttled") {
+      return tooManyAttempts(request, reply, outcome.retryAfter);
+    }
+    if (outcome.kind === "invalid") {
       request.reason = "invalid_link";
       return reply.code(401).send({ error: "invalid_link" });
     }
     request.reason = "redeemed";
-    return reply.code(200).send(tokenBody(issued));
+    return reply.code(200).send(tokenBody(outcome.issued));
   });
 
   // POST /v1/auth/refresh: rotates the refresh token. A new session row is

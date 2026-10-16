@@ -134,6 +134,24 @@ describe("T-MAGIC", () => {
     expect(session.statusCode).toBe(200);
   });
 
+  it("voids older unused links when a new one is made", async () => {
+    const { email, token } = await newLink();
+    expect((await redeem(t, token)).statusCode).toBe(200);
+    const send = () =>
+      t.app.inject({
+        method: "POST",
+        url: "/v1/auth/login",
+        payload: { email },
+      });
+    await send();
+    const older = (t.sender.lastTo(email) as { token: string }).token;
+    await send();
+    const newer = (t.sender.lastTo(email) as { token: string }).token;
+    expect(newer).not.toBe(older);
+    expect((await redeem(t, older)).statusCode).toBe(401);
+    expect((await redeem(t, newer)).statusCode).toBe(200);
+  });
+
   it("answers sign-up the same for a new and an existing email", async () => {
     const email = uniqueEmail();
     const first = await signup(t, email);
