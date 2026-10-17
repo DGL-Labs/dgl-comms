@@ -60,3 +60,23 @@ Invite emails are not checked against the domain blocklist, and actions on suspe
 ### Role bootstrap membership
 
 In PostgreSQL 16, `pingzo_owner` cannot revoke its own membership of `pingzo_keyresolver`, because the superuser made the grant. The superuser step in the role bootstrap does it after the migrations (see `docs/DB-ROLES.md`).
+
+### Workspaces SELECT is open (G5 round 2, SHOULD B)
+
+`workspaces` keeps `SELECT USING (true)` for `pingzo_app`, because the workspace ceiling at create and the transfer target's cap count rows across workspaces. So a route whose permission check is broken still returns another workspace's name, kind and status (`GET /v1/workspaces/:id`). `60-rls.test.ts` pins this behavior. At C-1d, SELECT is scoped to the context or `owner_id` = the caller, and the two counts move into SECURITY DEFINER count functions.
+
+### Owner not tied to an owner member row (G5 round 2, N1)
+
+The UPDATE policy on `workspaces` does not check that a new `owner_id` holds the owner row in `members`. A query bug inside the caller's own workspace could make any account its owner, using up that account's 3-workspace cap and blocking its account deletion as "shared". The transfer route's member check prevents this today.
+
+### Production role check (G5 round 2, N2)
+
+The T-ROLE check that no app role is a member of `pingzo_keyresolver` proves only the test bootstrap. C-1k adds the same fail-fast check at startup that `global-setup.ts` does. A later migration that alters `resolve_topic_key` needs the bootstrap's membership grant again.
+
+### Tables without RLS (G5 round 2, N3)
+
+`workspace_limits` and `audit_log` have no row-level security and are readable across workspaces (numbers and ids only). `TRUNCATE` is not yet in the privilege matrix in `00-role.test.ts`.
+
+### No concurrency tests (G5 round 2, N4)
+
+No test races two transfers against the target's cap, or account deletion against a transfer. Their serialization (the account row lock, then workspaces) comes from reading the code, not from a test.

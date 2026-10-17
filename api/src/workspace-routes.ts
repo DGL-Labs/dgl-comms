@@ -472,9 +472,12 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
         }
         // The target's cap, as for create: lock its account row so a create
         // and a transfer cannot both pass the count.
-        await tx.query("SELECT id FROM accounts WHERE id = $1 FOR UPDATE", [
-          targetId,
-        ]);
+        const target = await tx.query(
+          "SELECT id FROM accounts WHERE id = $1 FOR UPDATE",
+          [targetId],
+        );
+        // The target was deleted while this waited for its row.
+        if (target.rowCount !== 1) return { kind: "not_found" as const };
         const owned = await tx.query<{ n: number }>(
           "SELECT count(*)::int AS n FROM workspaces WHERE owner_id = $1",
           [targetId],

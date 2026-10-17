@@ -29,6 +29,13 @@ export async function deleteAccount(
   const now = options.now ?? new Date();
   const scope = await loadContext(tx, accountId);
 
+  // The caller's own account row first, as create and transfer lock it, so
+  // every route takes the account row before workspaces. A transfer to this
+  // account, or a create by it, waits until this transaction ends.
+  await tx.query("SELECT id FROM accounts WHERE id = $1 FOR UPDATE", [
+    accountId,
+  ]);
+
   // Lock the owned workspaces, in id order. Accepting an invitation locks the
   // same row, so no member can join between the count and the delete.
   // The owner is authoritative here, so these join the context even if a
@@ -43,8 +50,9 @@ export async function deleteAccount(
     "SELECT id FROM workspaces WHERE owner_id = $1 ORDER BY id FOR UPDATE",
     [accountId],
   );
+  // owned is a subset of candidates: a transfer to this account waits on the
+  // account row locked above, so nothing new joins the context here.
   const ownedIds = owned.rows.map((row) => row.id);
-  await scope.addWorkspaces(ownedIds);
   const counted = await tx.query<{
     workspace_id: string;
     members: number;

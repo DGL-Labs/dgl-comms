@@ -303,6 +303,16 @@ describe("T-RLS and T-KEYCTX", () => {
         expect(members.statusCode).toBe(200);
         expect(members.json<{ members: unknown[] }>().members).toEqual([]);
 
+        // Known gap (docs/KNOWN-GAPS.md): SELECT on workspaces is open, so a
+        // broken check still reads B's own row. Pinned until C-1d scopes it.
+        const read = await broken.inject({
+          method: "GET",
+          url: `/v1/workspaces/${wsB}`,
+          headers,
+        });
+        expect(read.statusCode).toBe(200);
+        expect(read.json<{ id: string }>().id).toBe(wsB);
+
         const removed = await broken.inject({
           method: "DELETE",
           url: `/v1/workspaces/${wsB}/members/${b.accountId}`,
