@@ -21,6 +21,13 @@ BEGIN
   -- REVOKE pingzo_keyresolver FROM pingzo_owner, because the grant below is
   -- the superuser's own and pingzo_owner cannot revoke it.
   GRANT pingzo_keyresolver TO pingzo_owner;
+  -- Owns the two workspace-count functions only (migration 0004). NOLOGIN and
+  -- BYPASSRLS, with SELECT on one column of workspaces. The same temporary
+  -- membership for pingzo_owner, removed by the same superuser step.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pingzo_counter') THEN
+    CREATE ROLE pingzo_counter NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEROLE NOCREATEDB;
+  END IF;
+  GRANT pingzo_counter TO pingzo_owner;
   -- The owner role owns the database, so it can create the citext extension
   -- (a trusted extension) and own everything in the public schema.
   EXECUTE format('ALTER DATABASE %I OWNER TO pingzo_owner', current_database());
