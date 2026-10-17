@@ -37,10 +37,6 @@ Sign-up answers 403 for an address that is not on the team allowlist and 202 for
 
 Accepted for C-1c (G5 round 1). Each has a later step that closes it.
 
-### Context is wider than the path (NOTE 7)
-
-The request context holds every workspace the caller belongs to, not just the one in the path. A route that forgot its permission check would see all of the caller's own workspaces. It is narrowed to the path workspace at C-1d.
-
 ### `withTx` is still allowed (NOTE 8)
 
 `withTx` (no context) remains available. It is safe only for tables with RLS. Writes to `workspaces` and `audit_log` must go through `withContext`.
@@ -59,15 +55,7 @@ Invite emails are not checked against the domain blocklist, and actions on suspe
 
 ### Role bootstrap membership
 
-In PostgreSQL 16, `pingzo_owner` cannot revoke its own membership of `pingzo_keyresolver`, because the superuser made the grant. The superuser step in the role bootstrap does it after the migrations (see `docs/DB-ROLES.md`).
-
-### Workspaces SELECT is open (G5 round 2, SHOULD B)
-
-`workspaces` keeps `SELECT USING (true)` for `pingzo_app`, because the workspace ceiling at create and the transfer target's cap count rows across workspaces. So a route whose permission check is broken still returns another workspace's name, kind and status (`GET /v1/workspaces/:id`). `60-rls.test.ts` pins this behavior. At C-1d, SELECT is scoped to the context or `owner_id` = the caller, and the two counts move into SECURITY DEFINER count functions.
-
-### Owner not tied to an owner member row (G5 round 2, N1)
-
-The UPDATE policy on `workspaces` does not check that a new `owner_id` holds the owner row in `members`. A query bug inside the caller's own workspace could make any account its owner, using up that account's 3-workspace cap and blocking its account deletion as "shared". The transfer route's member check prevents this today.
+In PostgreSQL 16, `pingzo_owner` cannot revoke its own membership of `pingzo_keyresolver` (and, from C-1d, `pingzo_counter`), because the superuser made the grant. The superuser step in the role bootstrap does it after the migrations (see `docs/DB-ROLES.md`).
 
 ### Production role check (G5 round 2, N2)
 
@@ -75,8 +63,15 @@ The T-ROLE check that no app role is a member of `pingzo_keyresolver` proves onl
 
 ### Tables without RLS (G5 round 2, N3)
 
-`workspace_limits` and `audit_log` have no row-level security and are readable across workspaces (numbers and ids only). `TRUNCATE` is not yet in the privilege matrix in `00-role.test.ts`.
+`workspace_limits` and `audit_log` have no row-level security and are readable across workspaces (numbers and ids only).
 
 ### No concurrency tests (G5 round 2, N4)
 
 No test races two transfers against the target's cap, or account deletion against a transfer. Their serialization (the account row lock, then workspaces) comes from reading the code, not from a test.
+
+## Closed at C-1d
+
+- Context is wider than the path (NOTE 7): `withPathContext` in `db.ts` sets the context to the path workspace intersected with the caller's memberships; it never adds one.
+- Workspaces SELECT is open (G5 round 2, SHOULD B): migration `0004` scopes the policy to the context or `owner_id` = the caller, and the two cross-workspace counts moved into the SECURITY DEFINER functions `count_owned_workspaces` and `count_workspaces_total`, owned by `pingzo_counter`.
+- Owner not tied to an owner member row (G5 round 2, N1): migration `0004` adds the owner-row `EXISTS` to the `workspaces` UPDATE policy's `WITH CHECK`.
+- `TRUNCATE` missing from the privilege matrix (G5 round 2, N3): `00-role.test.ts` now checks that `pingzo_app` has no `TRUNCATE` on any table.
