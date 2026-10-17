@@ -10,6 +10,8 @@ import { runMigrations } from "../../src/migrate.ts";
 declare module "vitest" {
   export interface ProvidedContext {
     dbUrl: string;
+    // pingzo_owner, for tests that must change a limit the app cannot change.
+    ownerUrl: string;
     logFile: string;
     secretsFile: string;
   }
@@ -67,6 +69,12 @@ export default async function setup({
   await runMigrations(
     urlFor(superUrl, database, "pingzo_owner", ownerPassword),
   );
+  // The superuser step of the role bootstrap, after the migrations: pingzo_owner
+  // keeps no membership of pingzo_keyresolver.
+  await asSuperuser(
+    urlFor(superUrl, database),
+    "REVOKE pingzo_keyresolver FROM pingzo_owner",
+  );
 
   // Fail fast if the app role is ever privileged (T-ROLE repeats this check).
   const appUrl = urlFor(superUrl, database, "pingzo_app", appPassword);
@@ -93,6 +101,10 @@ export default async function setup({
   writeFileSync(secretsFile, "");
 
   provide("dbUrl", appUrl);
+  provide(
+    "ownerUrl",
+    urlFor(superUrl, database, "pingzo_owner", ownerPassword),
+  );
   provide("logFile", logFile);
   provide("secretsFile", secretsFile);
 

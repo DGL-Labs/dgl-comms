@@ -1,4 +1,4 @@
-export type EmailKind = "verify" | "login";
+export type EmailKind = "verify" | "login" | "invite";
 
 export interface EmailMessage {
   to: string;
@@ -10,19 +10,24 @@ export interface EmailSender {
   send(message: EmailMessage): Promise<void>;
 }
 
-// The email text is fixed: only the token varies. A real provider (later)
-// renders this and sends it.
+const SUBJECTS: Record<EmailKind, string> = {
+  verify: "Verify your Pingzo account",
+  login: "Your Pingzo sign-in link",
+  invite: "You have been invited to Pingzo",
+};
+
+// The email text is fixed: only the token varies. An invitation carries no
+// workspace name and no user text. A real provider (later) renders this and
+// sends it.
 export function renderEmail(
   kind: EmailKind,
   token: string,
 ): { subject: string; text: string } {
-  const subject =
-    kind === "verify"
-      ? "Verify your Pingzo account"
-      : "Your Pingzo sign-in link";
+  const subject = SUBJECTS[kind];
+  const lifetime = kind === "invite" ? "7 days" : "15 minutes";
   const text =
     `Your Pingzo ${kind} token: ${token}\n` +
-    "It works once and expires in 15 minutes.\n" +
+    `It works once and expires in ${lifetime}.\n` +
     "If you did not ask for this, ignore this email.\n";
   return { subject, text };
 }

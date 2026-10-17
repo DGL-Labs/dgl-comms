@@ -3,8 +3,9 @@ import { deleteAccount } from "./account.ts";
 import { isBlockedDomain } from "./blocklist.ts";
 import { clientIp } from "./context.ts";
 import type { Ctx } from "./context.ts";
-import { first, withTx } from "./db.ts";
+import { first, withContext, withTx } from "./db.ts";
 import { requireSession } from "./guard.ts";
+import { isRecord, normalizeEmail } from "./input.ts";
 import { createMagicLink } from "./magic.ts";
 import { createSession, revokeAllSessions, revokeSession } from "./sessions.ts";
 import type { IssuedSession } from "./sessions.ts";
@@ -16,23 +17,15 @@ import {
   recordAttempt,
 } from "./throttle.ts";
 import { hashToken } from "./tokens.ts";
+import { registerInvitationRoutes } from "./invitation-routes.ts";
+import { registerWorkspaceRoutes } from "./workspace-routes.ts";
 
 const SIGNUP_CAP = 5;
 const SIGNUP_WINDOW_MS = 24 * 60 * 60 * 1000;
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // The same body for every sign-up and login that is accepted, so it does not
 // reveal whether the email exists.
 const ACCEPTED = { status: "accepted" };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function normalizeEmail(raw: string): string | null {
-  const email = raw.trim().toLowerCase();
-  return email.length <= 254 && EMAIL_PATTERN.test(email) ? email : null;
-}
 
 function badRequest(request: FastifyRequest, reply: FastifyReply) {
   request.reason = "bad_request";
@@ -71,6 +64,9 @@ function signupRefused(
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
+  registerWorkspaceRoutes(app, ctx);
+  registerInvitationRoutes(app, ctx);
+
   // POST /v1/auth/signup
   app.post("/v1/auth/signup", async (request, reply) => {
     const body = request.body;
@@ -403,10 +399,33 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
       allowUnverified: false,
     });
     if (session === null) return reply;
-    const ended = await withTx(ctx.pool, (tx) =>
-      deleteAccount(tx, session.accountId),
+    // ?confirm=true is needed only to delete solely-owned workspaces along
+    // with the account. A shared workspace refuses the delete either way.
+    const query = request.query;
+    const confirm = isRecord(query) && query.confirm === "true";
+    const outcome = await withContext(
+      ctx.pool,
+      { accountId: session.accountId },
+      (tx) =>
+        deleteAccount(tx, session.accountId, {
+          confirm,
+          now: ctx.clock.now(),
+        }),
     );
-    ctx.sessionsRevoked(ended);
+    if (outcome.kind === "shared") {
+      request.reason = "account_delete_shared";
+      return reply.code(409).send({ owned_workspaces: outcome.workspaces });
+    }
+    if (outcome.kind === "confirm") {
+      request.reason = "account_delete_confirm";
+      return reply.code(409).send({
+        owned_workspaces: outcome.workspaces.map((w) => ({
+          id: w.id,
+          action: "delete",
+        })),
+      });
+    }
+    ctx.sessionsRevoked(outcome.endedSessions);
     request.reason = "account_deleted";
     return reply.code(204).send();
   });
