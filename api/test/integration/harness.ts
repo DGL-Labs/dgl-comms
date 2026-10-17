@@ -115,9 +115,25 @@ export async function withAllWorkspaces<T>(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const all = await client.query<{ id: string }>("SELECT id FROM workspaces");
+    // SELECT on workspaces is scoped: a row is visible by id or by its owner.
+    // Every workspace has an owner, so reading as each account in turn finds
+    // them all.
+    const accounts = await client.query<{ id: string }>(
+      "SELECT id FROM accounts",
+    );
+    const ids: string[] = [];
+    for (const account of accounts.rows) {
+      await client.query("SELECT set_config('app.account_id', $1, true)", [
+        account.id,
+      ]);
+      const owned = await client.query<{ id: string }>(
+        "SELECT id FROM workspaces",
+      );
+      for (const row of owned.rows) ids.push(row.id);
+    }
+    await client.query("SELECT set_config('app.account_id', '', true)");
     await client.query("SELECT set_config('app.workspace_ids', $1, true)", [
-      `{${all.rows.map((r) => r.id).join(",")}}`,
+      `{${ids.join(",")}}`,
     ]);
     const result = await fn(client);
     await client.query("COMMIT");

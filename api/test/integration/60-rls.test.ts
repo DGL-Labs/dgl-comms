@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { withContext, withKeyContext } from "../../src/db.ts";
+import {
+  withContext,
+  withKeyContext,
+  withPathContext,
+} from "../../src/db.ts";
 import { hashToken } from "../../src/tokens.ts";
 import {
   api,
@@ -303,15 +307,14 @@ describe("T-RLS and T-KEYCTX", () => {
         expect(members.statusCode).toBe(200);
         expect(members.json<{ members: unknown[] }>().members).toEqual([]);
 
-        // Known gap (docs/KNOWN-GAPS.md): SELECT on workspaces is open, so a
-        // broken check still reads B's own row. Pinned until C-1d scopes it.
+        // SELECT on workspaces is scoped (C-1d A0): a broken check no longer
+        // reads B's own row.
         const read = await broken.inject({
           method: "GET",
           url: `/v1/workspaces/${wsB}`,
           headers,
         });
-        expect(read.statusCode).toBe(200);
-        expect(read.json<{ id: string }>().id).toBe(wsB);
+        expect(read.statusCode).toBe(404);
 
         const removed = await broken.inject({
           method: "DELETE",
@@ -349,6 +352,154 @@ describe("T-RLS and T-KEYCTX", () => {
         expect(await snapshot()).toEqual(before);
       } finally {
         await broken.close();
+      }
+    });
+  });
+
+  describe("A0: path context, scoped workspaces, count functions", () => {
+    it("workspaces SELECT shows the context's workspaces and the caller's own", async () => {
+      const ids = (settings: {
+        accountId?: string;
+        workspaceIds?: string[];
+      }) =>
+        inContext(t.pool, settings, async (c) =>
+          (await c.query<{ id: string }>("SELECT id FROM workspaces")).rows
+            .map((r) => r.id)
+            .sort(),
+        );
+      expect(await ids({})).toEqual([]);
+      expect(await ids({ workspaceIds: [wsA] })).toEqual([wsA]);
+      expect(await ids({ accountId: b.accountId })).toEqual([wsB]);
+      expect(await ids({ accountId: a.accountId })).toEqual(
+        [wsA, wsSuspended].sort(),
+      );
+    });
+
+    it("withPathContext holds only the path workspace for a member", async () => {
+      const seen = await withPathContext(
+        t.pool,
+        { accountId: a.accountId },
+        wsA,
+        async (tx) => {
+          const setting = await tx.query<{ v: string }>(
+            "SELECT current_setting('app.workspace_ids', true) AS v",
+          );
+          const workspaces = await tx.query<{ id: string }>(
+            "SELECT id FROM workspaces WHERE id = ANY ($1::uuid[])",
+            [[wsA, wsSuspended]],
+          );
+          return {
+            setting: setting.rows[0]?.v,
+            ids: workspaces.rows.map((r) => r.id),
+          };
+        },
+      );
+      // A is a member of wsA and wsSuspended and owns both: the setting holds
+      // only wsA, and so does what the context shows of members. (workspaces
+      // also shows the caller's own rows, by owner.)
+      expect(seen.setting).toBe(`{${wsA}}`);
+      expect(seen.ids.sort()).toEqual([wsA, wsSuspended].sort());
+    });
+
+    it("withPathContext gives a non-member an empty context and never adds", async () => {
+      const seen = await withPathContext(
+        t.pool,
+        { accountId: a.accountId },
+        wsB,
+        async (tx) => {
+          const setting = await tx.query<{ v: string }>(
+            "SELECT current_setting('app.workspace_ids', true) AS v",
+          );
+          const workspaces = await tx.query(
+            "SELECT id FROM workspaces WHERE id = $1",
+            [wsB],
+          );
+          const members = await tx.query(
+            "SELECT 1 FROM members WHERE workspace_id = $1",
+            [wsB],
+          );
+          return {
+            setting: setting.rows[0]?.v,
+            workspaces: workspaces.rowCount,
+            members: members.rowCount,
+          };
+        },
+      );
+      expect(seen).toEqual({ setting: "{}", workspaces: 0, members: 0 });
+    });
+
+    it("an owner change to an account without the owner row is refused", async () => {
+      // B is not a member of wsA, so it has no owner row there, even with the
+      // context set to wsA.
+      await expect(
+        inContext(
+          t.pool,
+          { accountId: a.accountId, workspaceIds: [wsA] },
+          (c) =>
+            c.query("UPDATE workspaces SET owner_id = $2 WHERE id = $1", [
+              wsA,
+              b.accountId,
+            ]),
+        ),
+      ).rejects.toThrow(/row-level security/);
+    });
+
+    it("the count functions count owners and are closed to PUBLIC", async () => {
+      const res = await t.pool.query<{
+        owned: number;
+        total: number;
+        none: number | null;
+      }>(
+        `SELECT count_owned_workspaces($1) AS owned,
+                count_workspaces_total() AS total,
+                count_owned_workspaces(NULL) AS none`,
+        [a.accountId],
+      );
+      expect(res.rows[0]).toEqual({ owned: 2, total: 3, none: null });
+      const priv = await t.pool.query<{
+        owned_pub: boolean;
+        total_pub: boolean;
+        owned_app: boolean;
+        total_app: boolean;
+      }>(
+        `SELECT has_function_privilege('public', 'count_owned_workspaces(uuid)', 'EXECUTE') AS owned_pub,
+                has_function_privilege('public', 'count_workspaces_total()', 'EXECUTE') AS total_pub,
+                has_function_privilege('pingzo_app', 'count_owned_workspaces(uuid)', 'EXECUTE') AS owned_app,
+                has_function_privilege('pingzo_app', 'count_workspaces_total()', 'EXECUTE') AS total_app`,
+      );
+      expect(priv.rows[0]).toEqual({
+        owned_pub: false,
+        total_pub: false,
+        owned_app: true,
+        total_app: true,
+      });
+    });
+
+    it("the count functions are STRICT STABLE SECURITY DEFINER with a fixed search_path", async () => {
+      const res = await t.pool.query<{
+        proname: string;
+        prosecdef: boolean;
+        proisstrict: boolean;
+        provolatile: string;
+        proconfig: string[] | null;
+        owner: string;
+      }>(
+        `SELECT p.proname, p.prosecdef, p.proisstrict, p.provolatile, p.proconfig,
+                r.rolname AS owner
+           FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+          WHERE p.proname IN ('count_owned_workspaces', 'count_workspaces_total')
+            AND p.pronamespace = 'public'::regnamespace
+          ORDER BY p.proname`,
+      );
+      expect(res.rows).toHaveLength(2);
+      for (const row of res.rows) {
+        expect(row.prosecdef, row.proname).toBe(true);
+        expect(row.proisstrict, row.proname).toBe(true);
+        expect(row.provolatile, row.proname).toBe("s");
+        expect(row.proconfig, row.proname).toContain(
+          "search_path=pg_catalog, pg_temp",
+        );
+        expect(row.owner, row.proname).toBe("pingzo_counter");
       }
     });
   });

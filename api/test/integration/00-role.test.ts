@@ -71,6 +71,91 @@ describe("T-ROLE", () => {
     }
   });
 
+  it("has no TRUNCATE on any table", async () => {
+    const res = await pool.query<{ t: string; ok: boolean }>(
+      `SELECT c.relname AS t, has_table_privilege(current_user, c.oid, 'TRUNCATE') AS ok
+         FROM pg_class c
+        WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r'`,
+    );
+    expect(res.rows.length).toBeGreaterThan(5);
+    for (const row of res.rows) {
+      expect(row.ok, `${row.t} TRUNCATE`).toBe(false);
+    }
+  });
+
+  describe("pingzo_counter", () => {
+    it("cannot log in, bypasses RLS, and is not a superuser", async () => {
+      const res = await pool.query<{
+        rolcanlogin: boolean;
+        rolbypassrls: boolean;
+        rolsuper: boolean;
+      }>(
+        `SELECT rolcanlogin, rolbypassrls, rolsuper
+           FROM pg_roles WHERE rolname = 'pingzo_counter'`,
+      );
+      expect(res.rows).toHaveLength(1);
+      expect(res.rows[0]?.rolcanlogin).toBe(false);
+      expect(res.rows[0]?.rolbypassrls).toBe(true);
+      expect(res.rows[0]?.rolsuper).toBe(false);
+    });
+
+    it("owns exactly the two count functions", async () => {
+      const owned = await pool.query<{ kind: string; name: string }>(
+        `SELECT 'function' AS kind, p.proname AS name
+           FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+          WHERE r.rolname = 'pingzo_counter'
+         UNION ALL
+         SELECT 'relation', c.relname
+           FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner
+          WHERE r.rolname = 'pingzo_counter'
+         UNION ALL
+         SELECT 'schema', n.nspname
+           FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner
+          WHERE r.rolname = 'pingzo_counter'
+          ORDER BY 2`,
+      );
+      expect(owned.rows).toEqual([
+        { kind: "function", name: "count_owned_workspaces" },
+        { kind: "function", name: "count_workspaces_total" },
+      ]);
+      const objects = await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n
+           FROM pg_shdepend d JOIN pg_roles r ON r.oid = d.refobjid
+          WHERE r.rolname = 'pingzo_counter' AND d.deptype = 'o'
+            AND d.dbid = (SELECT oid FROM pg_database
+                           WHERE datname = current_database())`,
+      );
+      expect(objects.rows[0]?.n).toBe(2);
+    });
+
+    it("has no member: pingzo_owner is not a member of it", async () => {
+      const res = await pool.query<{ member: string }>(
+        `SELECT m.rolname AS member
+           FROM pg_auth_members am
+           JOIN pg_roles r ON r.oid = am.roleid
+           JOIN pg_roles m ON m.oid = am.member
+          WHERE r.rolname = 'pingzo_counter'`,
+      );
+      expect(res.rows).toEqual([]);
+    });
+
+    it("has only SELECT on workspaces.owner_id", async () => {
+      const res = await pool.query<{ ok: boolean }>(
+        `SELECT has_column_privilege('pingzo_counter', 'workspaces', 'owner_id', 'SELECT')
+                AND NOT has_column_privilege('pingzo_counter', 'workspaces', 'name', 'SELECT')
+                AND NOT has_column_privilege('pingzo_counter', 'workspaces', 'id', 'SELECT')
+                AND NOT has_table_privilege('pingzo_counter', 'workspaces', 'INSERT')
+                AND NOT has_table_privilege('pingzo_counter', 'workspaces', 'UPDATE')
+                AND NOT has_table_privilege('pingzo_counter', 'workspaces', 'DELETE')
+                AND NOT has_table_privilege('pingzo_counter', 'members', 'SELECT')
+                AND NOT has_table_privilege('pingzo_counter', 'accounts', 'SELECT')
+                AND NOT has_schema_privilege('pingzo_counter', 'public', 'CREATE')
+                AS ok`,
+      );
+      expect(res.rows[0]?.ok).toBe(true);
+    });
+  });
+
   describe("pingzo_keyresolver", () => {
     it("cannot log in, bypasses RLS, and is not a superuser", async () => {
       const res = await pool.query<{
