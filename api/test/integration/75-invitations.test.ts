@@ -11,6 +11,7 @@ import {
   redeem,
   signupAndVerify,
   uniqueEmail,
+  withAllWorkspaces,
 } from "./harness.ts";
 import type { TestApp, User } from "./harness.ts";
 
@@ -265,10 +266,25 @@ describe("invitations", () => {
   });
 
   it("refuses to invite someone who is already a member, at accept", async () => {
-    await addMember(t, owner, ws, member);
+    // The invite route refuses a member (409, no email), so this case can only
+    // arise when the account joins after its invitation was sent.
     await invite(owner, member.email);
-    const res = await accept(member, tokenFor(member.email));
+    const token = tokenFor(member.email);
+    const db = ownerPool();
+    try {
+      await withAllWorkspaces(db, (c) =>
+        c.query(
+          `INSERT INTO members (workspace_id, account_id, role, created_at)
+           SELECT $1, id, 'member', now() FROM accounts WHERE email = $2`,
+          [ws, member.email],
+        ),
+      );
+    } finally {
+      await db.end();
+    }
+    const res = await accept(member, token);
     expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: "already_member" });
   });
 
   describe("T-INVITE-CAPS", () => {

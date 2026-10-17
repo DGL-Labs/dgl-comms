@@ -235,9 +235,10 @@ describe("T-RLS and T-KEYCTX", () => {
           t.pool,
           { accountId: a.accountId, workspaceIds: [wsA] },
           (c) =>
-            c.query("UPDATE workspaces SET status = 'suspended' WHERE id = $1", [
-              wsA,
-            ]),
+            c.query(
+              "UPDATE workspaces SET status = 'suspended' WHERE id = $1",
+              [wsA],
+            ),
         ),
       ).rejects.toThrow(/permission denied/);
     });
@@ -249,8 +250,7 @@ describe("T-RLS and T-KEYCTX", () => {
         // Everything of B, read as B's own context.
         const snapshot = () =>
           inContext(t.pool, { workspaceIds: [wsB] }, async (c) => {
-            const one = async (sql: string) =>
-              (await c.query(sql, [wsB])).rows;
+            const one = async (sql: string) => (await c.query(sql, [wsB])).rows;
             return {
               workspace: await one(
                 "SELECT id, owner_id, name, kind, status FROM workspaces WHERE id = $1",
@@ -453,7 +453,9 @@ describe("T-RLS and T-KEYCTX", () => {
       );
       expect(res.rows).toHaveLength(1);
       expect(res.rows[0]?.prosecdef).toBe(true);
-      expect(res.rows[0]?.proconfig).toContain("search_path=pg_catalog, pg_temp");
+      expect(res.rows[0]?.proconfig).toContain(
+        "search_path=pg_catalog, pg_temp",
+      );
       expect(res.rows[0]?.owner).toBe("pingzo_keyresolver");
     });
 
