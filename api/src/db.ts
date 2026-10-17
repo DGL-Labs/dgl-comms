@@ -42,6 +42,9 @@ export interface Scope {
   // to them some other way: a workspace this transaction just made, one that
   // a valid invitation names, or one the caller owns.
   addWorkspaces(workspaceIds: string[]): Promise<void>;
+  // Cuts the context down to one workspace: that workspace if it is already in
+  // the context, otherwise the empty list. It never adds a workspace.
+  narrowTo(workspaceId: string): Promise<void>;
 }
 
 export interface RequestContext {
@@ -88,6 +91,11 @@ export async function loadContext(
       }
       await setWorkspaceIds(tx, ids);
     },
+    async narrowTo(workspaceId) {
+      const keep = ids.includes(workspaceId) ? [workspaceId] : [];
+      ids.splice(0, ids.length, ...keep);
+      await setWorkspaceIds(tx, ids);
+    },
   };
 }
 
@@ -99,6 +107,22 @@ export function withContext<T>(
 ): Promise<T> {
   return withTx(pool, async (tx) => {
     const scope = await loadContext(tx, who.accountId, who.inviteHash);
+    return fn(tx, scope);
+  });
+}
+
+// For a route on /v1/workspaces/:id/...: the context is the path workspace
+// intersected with the caller's memberships. A member sees that one workspace;
+// a non-member sees none. It never adds a workspace, so a skipped or broken
+// permission check still reaches nothing of another workspace.
+export function withPathContext<T>(
+  pool: Pool,
+  who: RequestContext,
+  workspaceId: string,
+  fn: (tx: Db, scope: Scope) => Promise<T>,
+): Promise<T> {
+  return withContext(pool, who, async (tx, scope) => {
+    await scope.narrowTo(workspaceId);
     return fn(tx, scope);
   });
 }

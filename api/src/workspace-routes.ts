@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { writeAudit } from "./audit.ts";
 import type { Ctx } from "./context.ts";
-import { first, withContext } from "./db.ts";
+import { first, withContext, withPathContext } from "./db.ts";
 import { requireSession } from "./guard.ts";
 import { isRecord, isUuid, parseName } from "./input.ts";
 import { can, isRole } from "./permissions.ts";
@@ -50,11 +50,17 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
         await tx.query("SELECT id FROM accounts WHERE id = $1 FOR UPDATE", [
           me,
         ]);
-        const owned = await tx.query<{ n: number }>(
-          "SELECT count(*)::int AS n FROM workspaces WHERE owner_id = $1",
+        const owned = await tx.query<{ n: number | null }>(
+          "SELECT count_owned_workspaces($1) AS n",
           [me],
         );
-        if ((first(owned.rows)?.n ?? 0) >= MAX_OWNED_WORKSPACES) {
+        // A missing count fails closed.
+        const ownedCount = first(owned.rows)?.n;
+        if (
+          ownedCount === undefined ||
+          ownedCount === null ||
+          ownedCount >= MAX_OWNED_WORKSPACES
+        ) {
           return { kind: "too_many" as const };
         }
         // The global ceiling. A missing row fails closed.
@@ -64,11 +70,17 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
         const ceiling = await tx.query<{ ceiling: number }>(
           "SELECT max_workspaces_total AS ceiling FROM service_limits",
         );
-        const total = await tx.query<{ n: number }>(
-          "SELECT count(*)::int AS n FROM workspaces",
+        const total = await tx.query<{ n: number | null }>(
+          "SELECT count_workspaces_total() AS n",
         );
         const limit = first(ceiling.rows)?.ceiling;
-        if (limit === undefined || (first(total.rows)?.n ?? 0) >= limit) {
+        const totalCount = first(total.rows)?.n;
+        if (
+          limit === undefined ||
+          totalCount === undefined ||
+          totalCount === null ||
+          totalCount >= limit
+        ) {
           return { kind: "ceiling" as const };
         }
         const made = await tx.query<{ id: string }>(
@@ -162,9 +174,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
     const id = param(request, "id");
     if (id === null) return notFound(request, reply);
 
-    const outcome = await withContext(
+    const outcome = await withPathContext(
       ctx.pool,
       { accountId: session.accountId },
+      id,
       async (tx) => {
         const decision = await authorize(
           ctx,
@@ -204,9 +217,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
     const name = isRecord(body) ? parseName(body.name) : null;
     const now = ctx.clock.now();
 
-    const outcome = await withContext(
+    const outcome = await withPathContext(
       ctx.pool,
       { accountId: session.accountId },
+      id,
       async (tx) => {
         const decision = await authorize(
           ctx,
@@ -252,9 +266,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
     if (id === null) return notFound(request, reply);
     const now = ctx.clock.now();
 
-    const outcome = await withContext(
+    const outcome = await withPathContext(
       ctx.pool,
       { accountId: session.accountId },
+      id,
       async (tx) => {
         const decision = await authorize(
           ctx,
@@ -293,9 +308,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
     const id = param(request, "id");
     if (id === null) return notFound(request, reply);
 
-    const outcome = await withContext(
+    const outcome = await withPathContext(
       ctx.pool,
       { accountId: session.accountId },
+      id,
       async (tx) => {
         const decision = await authorize(
           ctx,
@@ -336,9 +352,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
         : null;
     const now = ctx.clock.now();
 
-    const outcome = await withContext(
+    const outcome = await withPathContext(
       ctx.pool,
       { accountId: session.accountId },
+      id,
       async (tx) => {
         const decision = await authorize(
           ctx,
@@ -396,9 +413,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
       const leaving = targetId === session.accountId;
       const now = ctx.clock.now();
 
-      const outcome = await withContext(
+      const outcome = await withPathContext(
         ctx.pool,
         { accountId: session.accountId },
+        id,
         async (tx) => {
           const decision = await authorize(
             ctx,
@@ -451,9 +469,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
       isRecord(body) && isUuid(body.accountId) ? body.accountId : null;
     const now = ctx.clock.now();
 
-    const outcome = await withContext(
+    const outcome = await withPathContext(
       ctx.pool,
       { accountId: session.accountId },
+      id,
       async (tx) => {
         const decision = await authorize(
           ctx,
@@ -478,11 +497,17 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
         );
         // The target was deleted while this waited for its row.
         if (target.rowCount !== 1) return { kind: "not_found" as const };
-        const owned = await tx.query<{ n: number }>(
-          "SELECT count(*)::int AS n FROM workspaces WHERE owner_id = $1",
+        const owned = await tx.query<{ n: number | null }>(
+          "SELECT count_owned_workspaces($1) AS n",
           [targetId],
         );
-        if ((first(owned.rows)?.n ?? 0) >= MAX_OWNED_WORKSPACES) {
+        // A missing count fails closed.
+        const ownedCount = first(owned.rows)?.n;
+        if (
+          ownedCount === undefined ||
+          ownedCount === null ||
+          ownedCount >= MAX_OWNED_WORKSPACES
+        ) {
           return { kind: "too_many" as const };
         }
         // One owner at a time: demote first, then promote.
