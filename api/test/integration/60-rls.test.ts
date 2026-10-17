@@ -1,10 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  withContext,
-  withKeyContext,
-  withPathContext,
-} from "../../src/db.ts";
+import { withContext, withKeyContext, withPathContext } from "../../src/db.ts";
 import { hashToken } from "../../src/tokens.ts";
 import {
   api,
@@ -358,10 +354,7 @@ describe("T-RLS and T-KEYCTX", () => {
 
   describe("A0: path context, scoped workspaces, count functions", () => {
     it("workspaces SELECT shows the context's workspaces and the caller's own", async () => {
-      const ids = (settings: {
-        accountId?: string;
-        workspaceIds?: string[];
-      }) =>
+      const ids = (settings: { accountId?: string; workspaceIds?: string[] }) =>
         inContext(t.pool, settings, async (c) =>
           (await c.query<{ id: string }>("SELECT id FROM workspaces")).rows
             .map((r) => r.id)
