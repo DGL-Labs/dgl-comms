@@ -18,6 +18,8 @@ import {
 } from "./throttle.ts";
 import { hashToken } from "./tokens.ts";
 import { registerInvitationRoutes } from "./invitation-routes.ts";
+import { registerKeyRoutes } from "./key-routes.ts";
+import { registerTopicRoutes } from "./topic-routes.ts";
 import { registerWorkspaceRoutes } from "./workspace-routes.ts";
 
 const SIGNUP_CAP = 5;
@@ -66,6 +68,8 @@ function signupRefused(
 export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
   registerWorkspaceRoutes(app, ctx);
   registerInvitationRoutes(app, ctx);
+  registerTopicRoutes(app, ctx);
+  registerKeyRoutes(app, ctx);
 
   // POST /v1/auth/signup
   app.post("/v1/auth/signup", async (request, reply) => {
