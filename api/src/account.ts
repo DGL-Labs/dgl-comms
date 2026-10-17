@@ -31,13 +31,19 @@ export async function deleteAccount(
 
   // Lock the owned workspaces, in id order. Accepting an invitation locks the
   // same row, so no member can join between the count and the delete.
+  // The owner is authoritative here, so these join the context even if a
+  // membership row were ever missing: the count must not under-report. They
+  // join before the lock, because FOR UPDATE passes the UPDATE policy.
+  const candidates = await tx.query<{ id: string }>(
+    "SELECT id FROM workspaces WHERE owner_id = $1 ORDER BY id",
+    [accountId],
+  );
+  await scope.addWorkspaces(candidates.rows.map((row) => row.id));
   const owned = await tx.query<{ id: string }>(
     "SELECT id FROM workspaces WHERE owner_id = $1 ORDER BY id FOR UPDATE",
     [accountId],
   );
   const ownedIds = owned.rows.map((row) => row.id);
-  // The owner is authoritative here, so these join the context even if a
-  // membership row were ever missing: the count must not under-report.
   await scope.addWorkspaces(ownedIds);
   const counted = await tx.query<{
     workspace_id: string;

@@ -256,15 +256,16 @@ export function registerInvitationRoutes(app: FastifyInstance, ctx: Ctx): void {
         );
         const workspaceId = first(found.rows)?.workspace_id;
         if (workspaceId === undefined) return { kind: "invalid" as const };
+        // The token and the email both match, so this one workspace joins
+        // the context. It is the only one the token can ever add. It must be
+        // in the context before the lock: FOR UPDATE passes the UPDATE policy.
+        await scope.addWorkspaces([workspaceId]);
         const locked = await tx.query(
           `SELECT id FROM workspaces
             WHERE id = $1 AND status = 'active' FOR UPDATE`,
           [workspaceId],
         );
         if (locked.rowCount !== 1) return { kind: "invalid" as const };
-        // The token and the email both match, so this one workspace joins
-        // the context. It is the only one the token can ever add.
-        await scope.addWorkspaces([workspaceId]);
         if ((await memberRole(tx, workspaceId, me)) !== null) {
           return { kind: "member" as const };
         }
