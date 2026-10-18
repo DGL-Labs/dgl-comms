@@ -45,24 +45,28 @@ export async function readDiskStatus(
 
 // The flag is set, and its alert written, in one statement: only the statement
 // that really flips the flag writes the alert, so a repeat check, even a
-// concurrent one, writes nothing.
+// concurrent one, writes nothing. The result row comes from the UPDATE: the
+// maintainer has no SELECT on service_alerts, so the INSERT cannot use
+// RETURNING.
 const SIGNUP_PAUSE_SQL = `WITH changed AS (
   UPDATE service_limits SET signup_paused = true
    WHERE id AND NOT signup_paused
   RETURNING 1
+), alerted AS (
+  INSERT INTO service_alerts (kind, level, detail)
+  SELECT 'disk_80', 'warning', $1::text FROM changed
 )
-INSERT INTO service_alerts (kind, level, detail)
-SELECT 'disk_80', 'warning', $1::text FROM changed
-RETURNING id`;
+SELECT 1 FROM changed`;
 
 const PUBLISH_PAUSE_SQL = `WITH changed AS (
   UPDATE service_limits SET publish_paused_non_internal = true
    WHERE id AND NOT publish_paused_non_internal
   RETURNING 1
+), alerted AS (
+  INSERT INTO service_alerts (kind, level, detail)
+  SELECT 'disk_90', 'critical', $1::text FROM changed
 )
-INSERT INTO service_alerts (kind, level, detail)
-SELECT 'disk_90', 'critical', $1::text FROM changed
-RETURNING id`;
+SELECT 1 FROM changed`;
 
 // Returns the kinds of the alerts it raised. It never clears a flag.
 export async function checkDisk(
@@ -104,6 +108,8 @@ export async function checkDiskStatusFile(
   return checkDisk(db, await readDiskStatus(path));
 }
 
+// The result row comes from the UPDATE: the maintainer has no SELECT on
+// audit_log, so the INSERT cannot use RETURNING.
 function clearSql(flag: ServiceFlag): string {
   switch (flag) {
     case "signup_paused":
@@ -111,20 +117,22 @@ function clearSql(flag: ServiceFlag): string {
   UPDATE service_limits SET signup_paused = false
    WHERE id AND signup_paused
   RETURNING 1
+), audited AS (
+  INSERT INTO audit_log (actor_account_id, action, target, reason)
+  SELECT $1::uuid, 'service.flag_clear', 'signup_paused', $2::text FROM cleared
 )
-INSERT INTO audit_log (actor_account_id, action, target, reason)
-SELECT $1::uuid, 'service.flag_clear', 'signup_paused', $2::text FROM cleared
-RETURNING id`;
+SELECT 1 FROM cleared`;
     case "publish_paused_non_internal":
       return `WITH cleared AS (
   UPDATE service_limits SET publish_paused_non_internal = false
    WHERE id AND publish_paused_non_internal
   RETURNING 1
+), audited AS (
+  INSERT INTO audit_log (actor_account_id, action, target, reason)
+  SELECT $1::uuid, 'service.flag_clear', 'publish_paused_non_internal', $2::text
+    FROM cleared
 )
-INSERT INTO audit_log (actor_account_id, action, target, reason)
-SELECT $1::uuid, 'service.flag_clear', 'publish_paused_non_internal', $2::text
-  FROM cleared
-RETURNING id`;
+SELECT 1 FROM cleared`;
     default:
       throw new Error("unknown service flag");
   }
