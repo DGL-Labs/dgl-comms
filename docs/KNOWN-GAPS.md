@@ -108,6 +108,10 @@ The global ceiling is checked and counted in one statement, but writers on diffe
 
 Only SQLSTATE `55P03` and the pool's connection timeout map to 503 `busy`. A `statement_timeout` (`57014`) is still a 500.
 
+### Account deletion leaves three C-1d references (G5 S3)
+
+Deleting an account does not yet remove three C-1d values that point at it: the sender id on its messages (`messages.sender_account_id`, no foreign key; the messages belong to the workspace and stay), its idempotency rows (`idempotency_keys.caller = 'a:<id>'`), and its rate bucket (`rate_buckets` key `acct:<id>`). The app has no DELETE on those two tables and no UPDATE on that column, and widening its grants is not part of C-1d. The C-1g purge removes or clears all three; until then the account id stays in those rows.
+
 ## Closed at C-1d
 
 - Context is wider than the path (NOTE 7): `withPathContext` in `db.ts` sets the context to the path workspace intersected with the caller's memberships; it never adds one.

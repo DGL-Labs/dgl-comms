@@ -36,3 +36,21 @@ GRANT INSERT ON service_alerts TO pingzo_maintainer;
 GRANT USAGE ON SEQUENCE service_alerts_id_seq TO pingzo_maintainer;
 GRANT INSERT ON audit_log TO pingzo_maintainer;
 GRANT USAGE ON SEQUENCE audit_log_id_seq TO pingzo_maintainer;
+
+-- Row-level security on audit_log (G5 S2). The invite caps count audit_log
+-- rows, so a maintainer able to insert any row could forge history or use up
+-- a cap. pingzo_app keeps exactly what its grants give it (SELECT and INSERT
+-- on every row). pingzo_maintainer may insert only a flag-clear row with no
+-- workspace. RLS is not forced, so pingzo_owner is unaffected.
+ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
+CREATE POLICY audit_log_app_select ON audit_log FOR SELECT TO pingzo_app
+  USING (true);
+CREATE POLICY audit_log_app_insert ON audit_log FOR INSERT TO pingzo_app
+  WITH CHECK (true);
+CREATE POLICY audit_log_maintainer_insert ON audit_log FOR INSERT
+  TO pingzo_maintainer
+  WITH CHECK (
+    action = 'service.flag_clear'
+    AND workspace_id IS NULL
+    AND target IN ('signup_paused', 'publish_paused_non_internal')
+  );

@@ -1,7 +1,10 @@
 -- C-1d A0: close the C-1c known gaps. Runs as pingzo_owner. Add-only.
 -- Grants: this file adds no table grant for pingzo_app. It grants EXECUTE on
 -- two functions to pingzo_app, and SELECT (owner_id) on workspaces plus USAGE
--- on the schema to pingzo_counter. Nothing else is granted or revoked.
+-- on the schema to pingzo_counter. EXECUTE on both functions is revoked from
+-- PUBLIC. pingzo_counter holds CREATE on the schema only around the two OWNER
+-- TO statements, and pingzo_counter is then revoked from pingzo_owner
+-- (section 3).
 
 -- 1. workspaces SELECT is scoped. A row is visible when its id is in the
 -- context, or when the caller owns it (a workspace this transaction just made

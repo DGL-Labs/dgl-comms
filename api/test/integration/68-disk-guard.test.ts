@@ -254,4 +254,29 @@ describe("T-DISKPAUSE", () => {
       ),
     ).rejects.toThrow("unknown service flag");
   });
+
+  // G5 S2: row-level security on audit_log lets the maintainer add only a
+  // flag-clear row with no workspace, so it cannot forge history or use up an
+  // invite cap.
+  it("cannot write any other audit row", async () => {
+    const insert = (
+      action: string,
+      workspaceId: string | null,
+      target: string,
+    ) =>
+      maintainer.query(
+        `INSERT INTO audit_log (actor_account_id, workspace_id, action, target)
+         VALUES ($1, $2, $3, $4)`,
+        [randomUUID(), workspaceId, action, target],
+      );
+    await expect(insert("invite.create", randomUUID(), "x")).rejects.toThrow(
+      /row-level security/,
+    );
+    await expect(
+      insert("service.flag_clear", randomUUID(), "signup_paused"),
+    ).rejects.toThrow(/row-level security/);
+    await expect(
+      insert("service.flag_clear", null, "max_workspaces_total"),
+    ).rejects.toThrow(/row-level security/);
+  });
 });

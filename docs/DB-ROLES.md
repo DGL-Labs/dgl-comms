@@ -6,7 +6,7 @@
 | `pingzo_app` | yes | The app. NOSUPERUSER, NOBYPASSRLS, and only the grants each migration gives it. |
 | `pingzo_keyresolver` | no | BYPASSRLS. Owns only `resolve_topic_key`. Nobody is a member of it. |
 | `pingzo_counter` | no | BYPASSRLS. Owns only `count_owned_workspaces` and `count_workspaces_total` (both `STRICT STABLE`, from migration `0004`). Its only table privilege is `SELECT (owner_id)` on `workspaces`, plus `USAGE` on the schema. Nobody is a member of it. |
-| `pingzo_maintainer` | yes | The disk guard (logic in C-1d, process at C-1f). NOSUPERUSER, NOBYPASSRLS. SELECT on `service_limits` and UPDATE of `signup_paused` and `publish_paused_non_internal`; INSERT on `service_alerts` and `audit_log`; USAGE on `service_alerts_id_seq` and `audit_log_id_seq` (migration `0007`). No privilege on any tenant table (T-ROLE checks every table). **Test bootstrap only:** production provisioning is at C-1k. |
+| `pingzo_maintainer` | yes | The disk guard (logic in C-1d, process at C-1f). NOSUPERUSER, NOBYPASSRLS. SELECT on `service_limits` and UPDATE of `signup_paused` and `publish_paused_non_internal`; INSERT on `service_alerts`, and on `audit_log` only for a `service.flag_clear` row with no workspace (row-level security, G5 S2); USAGE on `service_alerts_id_seq` and `audit_log_id_seq` (migration `0007`). No privilege on any tenant table (T-ROLE checks every table). **Test bootstrap only:** production provisioning is at C-1k. |
 
 ## Connection budget
 

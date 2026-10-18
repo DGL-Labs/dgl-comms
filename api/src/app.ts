@@ -62,7 +62,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({
     logger: false,
     genReqId: () => randomUUID(),
-    bodyLimit: 4096,
+    // Above the worst JSON escaping of a 2,048-byte body and a 120-character
+    // title (G5 S1). parseMessage keeps the real 2,048-byte body limit.
+    bodyLimit: 16384,
   });
   app.decorateRequest("accountId", null);
   app.decorateRequest("reason", null);

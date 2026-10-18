@@ -400,6 +400,26 @@ describe("publish", () => {
       expect(await messageCount(topic)).toBe(2);
     });
 
+    it("takes a 2,048-byte body sent with every character escaped", async () => {
+      // Python's json.dumps and requests send non-ASCII as \uXXXX by default:
+      // 1,024 times "é" is 2,048 body bytes but 6,144 request bytes (G5 S1).
+      const raw = (payload: string) =>
+        t.app.inject({
+          method: "POST",
+          url: `/v1/topics/${topic}/messages`,
+          headers: {
+            ...bearer(member.accessToken),
+            "content-type": "application/json",
+          },
+          payload,
+        });
+      const ok = await raw(`{"body":"${"\\u00e9".repeat(1024)}"}`);
+      expect(ok.statusCode).toBe(201);
+      const over = await raw(`{"body":"${"\\u00e9".repeat(1025)}"}`);
+      expect(over.statusCode).toBe(413);
+      expect(await messageCount(topic)).toBe(1);
+    });
+
     it("takes a title of 120 characters and refuses 121", async () => {
       const ok = await send(member, topic, {
         payload: { title: "t".repeat(120), body: "x" },
