@@ -6,11 +6,14 @@ import { loadBlocklist } from "./blocklist.ts";
 import type { Config } from "./config.ts";
 import { systemClock } from "./context.ts";
 import type { Clock, Ctx } from "./context.ts";
-import { isBusyError } from "./db.ts";
+import { isBusyError, startListener } from "./db.ts";
+import type { Listener } from "./db.ts";
 import type { EmailSender } from "./email.ts";
 import { createLogger } from "./log.ts";
 import type { LogSink } from "./log.ts";
 import { registerRoutes } from "./routes.ts";
+import { registerLongPollRoutes } from "./long-poll.ts";
+import { registerStreamRoutes } from "./stream.ts";
 
 export interface AppDeps {
   pool: Pool;
@@ -28,8 +31,18 @@ export interface AppDeps {
     skipPermissionChecks?: boolean;
     holdAfterSeqMs?: number;
     lockTimeoutMs?: number;
+    streamKeepaliveMs?: number;
+    streamProcessCap?: number;
+    streamSessionCap?: number;
+    streamRecheckMs?: number;
+    streamPollMs?: number;
+    listenBackoffMs?: number;
   };
 }
+
+// The LISTEN reconnect delay: 1 s, doubling, up to 30 s.
+const LISTEN_BACKOFF_MS = 1000;
+const LISTEN_BACKOFF_FACTOR = 30;
 
 export function buildApp(deps: AppDeps): FastifyInstance {
   const logger = createLogger(deps.logSink);
@@ -48,6 +61,12 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     skipPermissionChecks: deps.testHooks?.skipPermissionChecks === true,
     holdAfterSeqMs: deps.testHooks?.holdAfterSeqMs ?? null,
     lockTimeoutMs: deps.testHooks?.lockTimeoutMs ?? null,
+    streamKeepaliveMs: deps.testHooks?.streamKeepaliveMs ?? null,
+    streamProcessCap: deps.testHooks?.streamProcessCap ?? null,
+    streamSessionCap: deps.testHooks?.streamSessionCap ?? null,
+    streamRecheckMs: deps.testHooks?.streamRecheckMs ?? null,
+    streamPollMs: deps.testHooks?.streamPollMs ?? null,
+    listenBackoffMs: deps.testHooks?.listenBackoffMs ?? null,
     sessionsRevoked(sessionIds) {
       if (sessionIds.length === 0) return;
       try {
@@ -105,6 +124,84 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerRoutes(app, ctx);
+  const streams = registerStreamRoutes(app, ctx);
+  const polls = registerLongPollRoutes(
+    app,
+    ctx,
+    streams,
+    deps.config.longPollOn,
+  );
+
+  // The one LISTEN client of this process starts with the app (a failure to
+  // start fails the app) and closes with it, after every stream has ended.
+  // Streams end in preClose: Fastify closes the HTTP server before onClose
+  // runs, and the server waits for open connections, which streams are.
+  // If the connection drops, it is replaced with backoff while the streams
+  // poll (B4); each reconnect is a new connection.
+  let listener: Listener | null = null;
+  let stopped = false;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  const firstDelay = ctx.listenBackoffMs ?? LISTEN_BACKOFF_MS;
+  const longestDelay = firstDelay * LISTEN_BACKOFF_FACTOR;
+
+  function connectListener(): Promise<Listener> {
+    return startListener(
+      deps.config.listenUrl,
+      (channel, payload) => {
+        if (channel === "pingzo_msg") {
+          streams.notify(payload);
+          polls.wake(payload);
+        } else streams.aclNotify(payload);
+      },
+      onListenDown,
+    );
+  }
+
+  function onListenDown(): void {
+    if (stopped) return;
+    listener = null;
+    logger.log({ event: "listen_down", reason: "listen_down" });
+    streams.listenDown();
+    scheduleReconnect(firstDelay);
+  }
+
+  function scheduleReconnect(delay: number): void {
+    retry = setTimeout(() => {
+      retry = null;
+      void reconnect(delay);
+    }, delay);
+  }
+
+  async function reconnect(delay: number): Promise<void> {
+    if (stopped) return;
+    try {
+      const fresh = await connectListener();
+      if (stopped) {
+        await fresh.close();
+        return;
+      }
+      listener = fresh;
+      logger.log({ event: "listen_up", reason: "listen_up" });
+      streams.listenUp();
+    } catch {
+      scheduleReconnect(Math.min(delay * 2, longestDelay));
+    }
+  }
+
+  app.addHook("onReady", async () => {
+    listener = await connectListener();
+  });
+  app.addHook("preClose", async () => {
+    polls.endAll();
+    streams.endAll("server_closing");
+  });
+  app.addHook("onClose", async () => {
+    stopped = true;
+    if (retry !== null) clearTimeout(retry);
+    retry = null;
+    if (listener !== null) await listener.close();
+    listener = null;
+  });
 
   return app;
 }

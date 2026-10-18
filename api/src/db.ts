@@ -174,6 +174,80 @@ export function withKeyContext<T>(
   });
 }
 
+// A short transaction whose context is exactly one workspace. For work that
+// has no caller of its own, such as loading a message for a stream: the
+// workspace comes from state the server recorded, never from a notification.
+export function withWorkspaceTx<T>(
+  pool: Pool,
+  workspaceId: string,
+  fn: (tx: Db) => Promise<T>,
+): Promise<T> {
+  return withTx(pool, async (tx) => {
+    await setWorkspaceIds(tx, [workspaceId]);
+    return fn(tx);
+  });
+}
+
+export interface Listener {
+  close(): Promise<void>;
+}
+
+export type ListenChannel = "pingzo_msg" | "pingzo_acl";
+
+// The application_name of the LISTEN connection. A test finds the backend by it.
+export const LISTEN_APPLICATION_NAME = "pingzo_listen";
+
+// One LISTEN connection: a direct connection that is not part of the pool, on
+// pingzo_msg (a message was published) and pingzo_acl (access changed).
+// onNotify gets the channel and the raw payload, which is a hint and nothing
+// more. onDown runs once when the connection fails or ends; this function does
+// not reconnect (the caller starts a new one).
+export async function startListener(
+  connectionString: string,
+  onNotify: (channel: ListenChannel, payload: string) => void,
+  onDown: () => void,
+): Promise<Listener> {
+  const client = new pg.Client({
+    connectionString,
+    application_name: LISTEN_APPLICATION_NAME,
+  });
+  let closing = false;
+  let down = false;
+  // A failure before both LISTENs are in place is thrown by this function
+  // instead of reported through onDown.
+  let ready = false;
+  const failed = () => {
+    if (closing || down || !ready) return;
+    down = true;
+    client.end().catch(() => undefined);
+    onDown();
+  };
+  client.on("notification", (message) => {
+    if (closing || down) return;
+    if (message.channel === "pingzo_msg" || message.channel === "pingzo_acl") {
+      onNotify(message.channel, message.payload ?? "");
+    }
+  });
+  client.on("error", failed);
+  client.on("end", failed);
+  try {
+    await client.connect();
+    await client.query("LISTEN pingzo_msg");
+    await client.query("LISTEN pingzo_acl");
+    ready = true;
+  } catch (error) {
+    closing = true;
+    await client.end().catch(() => undefined);
+    throw error;
+  }
+  return {
+    async close() {
+      closing = true;
+      await client.end().catch(() => undefined);
+    },
+  };
+}
+
 // One statement in a transaction of its own, for the counters (rate_buckets and
 // the usage tables hold numbers, not tenant rows, and have no row-level
 // security). It commits at once, so a debit stays even if the request fails

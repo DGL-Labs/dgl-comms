@@ -38,13 +38,13 @@ export function signAccessToken(
     .sign(key.secret);
 }
 
-// Returns the account and session ids from a valid access token, else null.
-// The algorithm, issuer, audience and key id must all match.
+// Returns the account and session ids and the expiry from a valid access token,
+// else null. The algorithm, issuer, audience and key id must all match.
 export async function readAccessToken(
   key: JwtKey,
   token: string,
   now: Date,
-): Promise<{ accountId: string; sessionId: string } | null> {
+): Promise<{ accountId: string; sessionId: string; expiresAt: Date } | null> {
   try {
     const { payload, protectedHeader } = await jwtVerify(token, key.secret, {
       algorithms: ["HS256"],
@@ -55,7 +55,12 @@ export async function readAccessToken(
     if (protectedHeader.kid !== key.kid) return null;
     const sid = payload.sid;
     if (typeof payload.sub !== "string" || typeof sid !== "string") return null;
-    return { accountId: payload.sub, sessionId: sid };
+    if (typeof payload.exp !== "number") return null;
+    return {
+      accountId: payload.sub,
+      sessionId: sid,
+      expiresAt: new Date(payload.exp * 1000),
+    };
   } catch {
     return null;
   }

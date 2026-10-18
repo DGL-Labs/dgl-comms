@@ -6,12 +6,15 @@ import {
   api,
   bearer,
   createWorkspace,
+  listenOnFreePort,
   makeApp,
   makeUser,
+  openStream,
   redeem,
   registerSecret,
   signupAndVerify,
   uniqueEmail,
+  until,
 } from "./harness.ts";
 import type { TestApp } from "./harness.ts";
 
@@ -26,6 +29,7 @@ const ALLOWED_FIELDS = [
 ];
 
 interface LogEntry {
+  event: string;
   route: string | null;
   status: number | null;
   reason: string | null;
@@ -132,6 +136,28 @@ describe("T-LOGS", () => {
     await api(t, host, "DELETE", `/v1/keys/${keyId}`);
     await byKey(key);
     await api(t, host, "POST", `/v1/keys/${keyId}/rotate`);
+    // Streams: one that opens, gets the message and ends, and refusals (a key,
+    // a key in the query, a bad Last-Event-ID, a topic of no workspace of the
+    // caller's). Neither the message body nor any credential may reach the log.
+    const base = await listenOnFreePort(t.app);
+    const stranger = await makeUser(t);
+    const opened = await openStream(base, topicId, bearer(host.accessToken));
+    await api(t, host, "POST", publishUrl, { body: probeBody });
+    await opened.until(() => opened.events.length === 1);
+    opened.close();
+    const refusals: [Record<string, string>, string][] = [
+      [{ authorization: `Bearer ${key}` }, ""],
+      [bearer(host.accessToken), `?key=${encodeURIComponent(key)}`],
+      [{ ...bearer(host.accessToken), "last-event-id": "nope" }, ""],
+      [bearer(stranger.accessToken), ""],
+    ];
+    for (const [headers, query] of refusals) {
+      const refused = await openStream(base, topicId, headers, query);
+      await refused.until(() => refused.closed);
+    }
+    const ended = () =>
+      readFileSync(inject("logFile"), "utf8").includes('"stream_end"');
+    await until(ended);
     await t.app.inject({ method: "GET", url: "/healthz", headers: extra });
     await t.app.inject({
       method: "POST",
@@ -166,6 +192,61 @@ describe("T-LOGS", () => {
     }
     expect(statuses("/v1/keys/:keyId/rotate").has(409)).toBe(true);
     expect(entries.some((e) => e.reason === "key_in_query")).toBe(true);
+  });
+
+  it("logs stream open, end and refusal by route, status and reason only", () => {
+    const entries = readFileSync(inject("logFile"), "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as LogEntry);
+    const route = "/v1/topics/:id/stream";
+    const opens = entries.filter((e) => e.event === "stream_open");
+    const ends = entries.filter((e) => e.event === "stream_end");
+    expect(opens.length).toBeGreaterThan(0);
+    expect(ends.length).toBeGreaterThan(0);
+    for (const entry of [...opens, ...ends]) {
+      expect(entry.route).toBe(route);
+      expect(entry.status).toBe(200);
+    }
+    expect(ends.some((e) => e.reason === "client_closed")).toBe(true);
+    const refused = entries.filter(
+      (e) => e.event === "request" && e.route === route,
+    );
+    for (const status of [400, 401, 404]) {
+      expect(
+        refused.some((e) => e.status === status),
+        `stream ${status}`,
+      ).toBe(true);
+    }
+    expect(refused.some((e) => e.reason === "key_refused")).toBe(true);
+    expect(refused.some((e) => e.reason === "key_in_query")).toBe(true);
+  });
+
+  it("logs LISTEN outages and why streams end, by reason code only", () => {
+    const entries = readFileSync(inject("logFile"), "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as LogEntry);
+    for (const event of ["listen_down", "listen_up"]) {
+      const lines = entries.filter((e) => e.event === event);
+      expect(lines.length, event).toBeGreaterThan(0);
+      for (const line of lines) {
+        expect(line.reason).toBe(event);
+        expect(line.route).toBeNull();
+        expect(line.status).toBeNull();
+      }
+    }
+    const reasons = new Set(
+      entries.filter((e) => e.event === "stream_end").map((e) => e.reason),
+    );
+    for (const reason of [
+      "client_closed",
+      "revoked",
+      "token_expired",
+      "server_closing",
+    ]) {
+      expect(reasons.has(reason), `stream end ${reason}`).toBe(true);
+    }
   });
 
   it("never contains a test email, token, JWT or header value", () => {

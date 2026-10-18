@@ -36,6 +36,17 @@ export interface Ctx {
   // Null outside tests. To be excluded from production builds later.
   holdAfterSeqMs: number | null;
   lockTimeoutMs: number | null;
+  // Test hooks for streams, from AppDeps.testHooks only, never from config:
+  // the keepalive interval, the per-process stream cap, the access re-check
+  // interval, the outage poll interval, and the first LISTEN reconnect delay.
+  // Null outside tests.
+  streamKeepaliveMs: number | null;
+  streamProcessCap: number | null;
+  // The per-session stream cap, for the load job only (3 otherwise).
+  streamSessionCap: number | null;
+  streamRecheckMs: number | null;
+  streamPollMs: number | null;
+  listenBackoffMs: number | null;
   // Wraps the onSessionRevoked hook; ignores empty lists and hook errors.
   sessionsRevoked(sessionIds: string[]): void;
 }

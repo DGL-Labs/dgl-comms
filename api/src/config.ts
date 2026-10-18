@@ -4,6 +4,11 @@ import type { TrustedProxies } from "./ip.ts";
 
 export interface Config {
   databaseUrl: string;
+  // The direct connection for LISTEN (past any pooler). Falls back to
+  // databaseUrl when PINGZO_LISTEN_URL is unset or empty.
+  listenUrl: string;
+  // The long-poll fallback (B6): off unless PINGZO_LONG_POLL is "true".
+  longPollOn: boolean;
   jwtKey: string;
   jwtKid: string;
   allowlistOn: boolean;
@@ -60,8 +65,14 @@ export function loadConfig(env: Env): Config {
     throw new Error("PINGZO_PORT must be a port number");
   }
 
+  const databaseUrl = required(env, "PINGZO_DATABASE_URL");
+  const listenUrl = env.PINGZO_LISTEN_URL;
+
   return {
-    databaseUrl: required(env, "PINGZO_DATABASE_URL"),
+    databaseUrl,
+    listenUrl:
+      listenUrl === undefined || listenUrl === "" ? databaseUrl : listenUrl,
+    longPollOn: env.PINGZO_LONG_POLL === "true",
     jwtKey,
     jwtKid,
     allowlistOn: flag === "true",

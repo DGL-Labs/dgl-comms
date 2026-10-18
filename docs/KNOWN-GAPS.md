@@ -112,6 +112,61 @@ Only SQLSTATE `55P03` and the pool's connection timeout map to 503 `busy`. A `st
 
 Deleting an account does not yet remove three C-1d values that point at it: the sender id on its messages (`messages.sender_account_id`, no foreign key; the messages belong to the workspace and stay), its idempotency rows (`idempotency_keys.caller = 'a:<id>'`), and its rate bucket (`rate_buckets` key `acct:<id>`). The app has no DELETE on those two tables and no UPDATE on that column, and widening its grants is not part of C-1d. The C-1g purge removes or clears all three; until then the account id stays in those rows.
 
+## C-1e (stream, LISTEN, revocation, long-poll)
+
+Accepted for C-1e. Each has a later step that closes it.
+
+### Cloudflare buffering (PC ruling D1)
+
+T-SSE-CF (Cloudflare buffering) is deferred to C-1l, on the real deployment (PC ruling D1). C-1e proves SSE locally and in CI. The long-poll fallback (B6) is built behind a flag in case Cloudflare buffers the stream.
+
+### Revocation is a hint plus a re-check (PC ruling 1143)
+
+- Database triggers send `pingzo_acl` with ids only. They fire on member removal or a role change, session revoke, account deletion or status change, topic delete, and workspace suspension or delete.
+- Any database role can send `pg_notify`. So a notification only makes the matching streams re-check their access; it never closes a stream by itself. A forged notification costs one re-check per matching stream, and closes nothing.
+- A role change re-checks but cannot close a stream today, because every role has `workspace.read`.
+- With the notification channel down, revocation relies on the 60-second re-check.
+- A token refresh revokes the old session. Its streams end with `token_refreshed`, not `revoked`, while the newer
+  session of the same chain is still valid (G5 SHOULD-1 on dbe3e586). The client reconnects with the new token.
+
+### Suspended workspaces
+
+The stream and the long-poll refuse a suspended workspace. Other read routes still allow it: `decide()` does not check the status (the same as C-1c note 12). The admin surface (C-1f onward) decides the rule for the rest.
+
+### Delivery details
+
+- The `pingzo_msg` payload is `<topic_id>:<seq>`, a hint only. Rows are loaded in the workspace recorded on the open stream, and access is enforced by the re-check, not per row.
+- A long-poll that finds nothing, and then misses a hint in the moment before it starts waiting, answers at its next 5-second re-read instead.
+- The stream and long-poll caps (3 per session, 2,000 per process) are counted in memory, per server process.
+
+### Must close before the C-1l first deploy (G5 on dbe3e586)
+
+These are planned for the private repository (C-1f onward). Each must be closed, with a test, before the first deploy at
+C-1l. No code for them is in C-1e.
+
+- **The 5-second revocation bound under load, and outage-poll flooding (G5 SHOULD-2).**
+  - Every re-check, hinted or periodic, runs one after another on one queue per process. A `workspace:` or `topic:` hint
+    that matches many streams queues them all, so near the 2,000-stream cap the last one closes after 10 seconds or
+    more. A person-level hint can also wait behind periodic re-checks. `docs/STREAM.md` states this limit.
+  - While the notification channel is down, or when it returns, each topic with open streams is polled in its own
+    chain, all at once. With many topics this asks for one pooled connection per topic against a pool of 8, so user
+    requests can get 503 `busy`.
+  - To close: hinted re-checks before periodic ones (two queues); one query for all the streams that a `workspace:` or
+    `topic:` hint matches; topic polls through a small bounded worker (2 to 4 at a time); and a test with many streams
+    on one workspace that checks they all close within 5 seconds.
+- **No backpressure on a slow reader (G5 SHOULD-4).** A client that keeps TCP open but does not read makes the server
+  buffer every message and keepalive for it, without limit. To close: end the stream when its unsent buffer passes a
+  limit (for example 1 MiB), with a logged reason code and no `end` event, so the client reconnects with
+  `Last-Event-ID`.
+- **A half-open LISTEN connection is not detected (G5 SHOULD-5).** If the path to Postgres goes half-open, no error
+  arrives, the outage poll never starts, and live delivery stops (revocation still holds through the 60-second
+  re-check). To close: TCP keepalive on the LISTEN client and a heartbeat query with a short timeout that treats a
+  failure as the connection lost.
+
+### Test hooks
+
+`AppDeps.testHooks` gains `streamKeepaliveMs`, `streamProcessCap`, `streamSessionCap`, `streamRecheckMs`, `streamPollMs` and `listenBackoffMs`. They come from `deps` only, never from config or the environment, like the C-1d hooks, and are to be excluded from production builds later.
+
 ## Closed at C-1d
 
 - Context is wider than the path (NOTE 7): `withPathContext` in `db.ts` sets the context to the path workspace intersected with the caller's memberships; it never adds one.
