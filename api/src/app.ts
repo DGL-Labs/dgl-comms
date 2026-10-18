@@ -6,11 +6,13 @@ import { loadBlocklist } from "./blocklist.ts";
 import type { Config } from "./config.ts";
 import { systemClock } from "./context.ts";
 import type { Clock, Ctx } from "./context.ts";
-import { isBusyError } from "./db.ts";
+import { isBusyError, startListener } from "./db.ts";
+import type { Listener } from "./db.ts";
 import type { EmailSender } from "./email.ts";
 import { createLogger } from "./log.ts";
 import type { LogSink } from "./log.ts";
 import { registerRoutes } from "./routes.ts";
+import { registerStreamRoutes } from "./stream.ts";
 
 export interface AppDeps {
   pool: Pool;
@@ -28,6 +30,8 @@ export interface AppDeps {
     skipPermissionChecks?: boolean;
     holdAfterSeqMs?: number;
     lockTimeoutMs?: number;
+    streamKeepaliveMs?: number;
+    streamProcessCap?: number;
   };
 }
 
@@ -48,6 +52,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     skipPermissionChecks: deps.testHooks?.skipPermissionChecks === true,
     holdAfterSeqMs: deps.testHooks?.holdAfterSeqMs ?? null,
     lockTimeoutMs: deps.testHooks?.lockTimeoutMs ?? null,
+    streamKeepaliveMs: deps.testHooks?.streamKeepaliveMs ?? null,
+    streamProcessCap: deps.testHooks?.streamProcessCap ?? null,
     sessionsRevoked(sessionIds) {
       if (sessionIds.length === 0) return;
       try {
@@ -105,6 +111,23 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerRoutes(app, ctx);
+  const streams = registerStreamRoutes(app, ctx);
+
+  // The one LISTEN client of this process starts with the app (a failure to
+  // start fails the app) and closes with it, after every stream has ended.
+  let listener: Listener | null = null;
+  app.addHook("onReady", async () => {
+    listener = await startListener(
+      deps.config.listenUrl,
+      (payload) => streams.notify(payload),
+      () => logger.log({ event: "listen_down", reason: "listen_down" }),
+    );
+  });
+  app.addHook("onClose", async () => {
+    streams.endAll("server_closing");
+    if (listener !== null) await listener.close();
+    listener = null;
+  });
 
   return app;
 }

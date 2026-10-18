@@ -12,6 +12,13 @@ async function main(): Promise<void> {
   const app = buildApp({ pool, config, sender: new TestSink() });
   await app.listen({ host: config.host, port: config.port });
   createLogger().log({ event: "startup" });
+  // app.close() ends every open stream and closes the LISTEN client; without
+  // it an open stream would hold the process up.
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.once(signal, () => {
+      void app.close().then(() => pool.end());
+    });
+  }
 }
 
 main().catch((error: unknown) => {

@@ -97,7 +97,7 @@ function topicParam(request: FastifyRequest): string | null {
 }
 
 // A key in the query string is refused, whatever the parameter is called.
-function keyInQuery(query: unknown): boolean {
+export function keyInQuery(query: unknown): boolean {
   if (!isRecord(query)) return false;
   return Object.entries(query).some(
     ([name, value]) =>
