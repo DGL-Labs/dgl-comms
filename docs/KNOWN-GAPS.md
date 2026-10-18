@@ -69,6 +69,31 @@ The T-ROLE check that no app role is a member of `pingzo_keyresolver` proves onl
 
 No test races two transfers against the target's cap, or account deletion against a transfer. Their serialization (the account row lock, then workspaces) comes from reading the code, not from a test.
 
+## C-1d (publish and limits)
+
+Accepted for C-1d. Each has a later step that closes it.
+
+### A failed publish still counts
+
+The workspace bucket, the workspace daily counter and the global counter are debited, each in its own statement, before the main transaction runs. If the main transaction then fails (a body that is too large, a 503 `busy`, an idempotency conflict, a pause flag), the debit stays. A client that retries a refused publish uses up its allowance faster. This is intended: a refused or failed attempt costs the service something, and a debit that could be undone would need the debit and the publish in one transaction, which would hold a counter row lock for the whole publish.
+
+The global ceiling is checked and counted in one statement, but writers on different shards do not wait on each other, so the day's total can pass `max_msgs_per_day_total` by about the number of publishes in flight at once.
+
+### Test hooks (`holdAfterSeqMs`, `lockTimeoutMs`)
+
+`AppDeps.testHooks.holdAfterSeqMs` holds a publish transaction after it takes its `seq`, with `statement_timeout` and `idle_in_transaction_session_timeout` off on that connection only. `AppDeps.testHooks.lockTimeoutMs` overrides `lock_timeout` for one app instance (and sets `statement_timeout` 5 seconds above it, so that the wait is not cut short). Both come from `deps` only, never from config or the environment, like `skipPermissionChecks` (NOTE 9). They are to be excluded from production builds later.
+
+### Bucket retention (with NOTE 15)
+
+`rate_buckets` rows named `ip:<address>` and `acct:<account id>` hold personal data and have no retention yet. Nothing purges them, nor the `ws:` rows, `workspace_usage_daily`, `global_usage_minute` or `idempotency_keys`. The purge comes at C-1g, together with the other retention jobs in NOTE 15, and the privacy policy must cover these records.
+
+### Publish details
+
+- A session caller is charged to its `acct:` bucket after its session check, so a request with no valid session is charged to nothing. Only key callers are charged to an `ip:` bucket first.
+- The publish permission check (`message.post`) does not lock the workspace row, unlike `authorize` for other actions, so publishes to different topics of one workspace do not wait on each other. A membership change that commits between the preflight and the main transaction is seen by the second check; one that commits after it is not.
+- A person's message has the sender label `Member` for now. The sender account id is stored; a display name comes with the clients.
+- A committed idempotency row whose message has since been deleted (a topic deleted with its messages) answers 409 `idempotency_conflict` until the row is 24 hours old.
+
 ## Closed at C-1d
 
 - Context is wider than the path (NOTE 7): `withPathContext` in `db.ts` sets the context to the path workspace intersected with the caller's memberships; it never adds one.
