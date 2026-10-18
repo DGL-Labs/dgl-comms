@@ -86,87 +86,95 @@ describe("T-STALL", () => {
     });
   }
 
-  it("(i) a waiter with a 30 second lock timeout gets the next seq once the holder commits", async () => {
-    const slow = await appWithHooks(t, { holdAfterSeqMs: HOLD_MS });
-    const patient = await appWithHooks(t, { lockTimeoutMs: 30_000 });
-    try {
-      const a = publish(slow, owner, topicT);
-      // Let A take its seq and start holding.
-      await sleep(2000);
-      const started = Date.now();
-      const b = await publish(patient, member, topicT);
-      const waited = Date.now() - started;
-      const aResult = await a;
+  it(
+    "(i) a waiter with a 30 second lock timeout gets the next seq once the holder commits",
+    async () => {
+      const slow = await appWithHooks(t, { holdAfterSeqMs: HOLD_MS });
+      const patient = await appWithHooks(t, { lockTimeoutMs: 30_000 });
+      try {
+        const a = publish(slow, owner, topicT);
+        // Let A take its seq and start holding.
+        await sleep(2000);
+        const started = Date.now();
+        const b = await publish(patient, member, topicT);
+        const waited = Date.now() - started;
+        const aResult = await a;
 
-      expect(aResult.statusCode).toBe(201);
-      expect(b.statusCode).toBe(201);
-      expect(b.json<Sent>().seq).toBe(aResult.json<Sent>().seq + 1);
-      // B really waited for A.
-      expect(waited).toBeGreaterThan(5000);
-    } finally {
-      await slow.close();
-      await patient.close();
-    }
-  }, TIMEOUT);
+        expect(aResult.statusCode).toBe(201);
+        expect(b.statusCode).toBe(201);
+        expect(b.json<Sent>().seq).toBe(aResult.json<Sent>().seq + 1);
+        // B really waited for A.
+        expect(waited).toBeGreaterThan(5000);
+      } finally {
+        await slow.close();
+        await patient.close();
+      }
+    },
+    TIMEOUT,
+  );
 
-  it("(ii) with the 3 second timeout B gets 503 busy, other topics go on, and a retry makes one message", async () => {
-    const slow = await appWithHooks(t, { holdAfterSeqMs: HOLD_MS });
-    const strict = await appWithHooks(t, { lockTimeoutMs: 3000 });
-    const db = ownerPool();
-    try {
-      let aDone = false;
-      const a = publish(slow, owner, topicT).then((res) => {
-        aDone = true;
-        return res;
-      });
-      await sleep(2000);
+  it(
+    "(ii) with the 3 second timeout B gets 503 busy, other topics go on, and a retry makes one message",
+    async () => {
+      const slow = await appWithHooks(t, { holdAfterSeqMs: HOLD_MS });
+      const strict = await appWithHooks(t, { lockTimeoutMs: 3000 });
+      const db = ownerPool();
+      try {
+        let aDone = false;
+        const a = publish(slow, owner, topicT).then((res) => {
+          aDone = true;
+          return res;
+        });
+        await sleep(2000);
 
-      // B waits for the topic lock, gives up after 3 seconds, and is told to
-      // retry.
-      const key = { "idempotency-key": "stall-retry" };
-      const b1 = await publish(strict, member, topicT, key);
-      expect(b1.statusCode).toBe(503);
-      expect(b1.json()).toEqual({ error: "busy" });
-      // The rolled-back attempt freed the key.
-      const claimed = await withAllWorkspaces(db, (c) =>
-        c.query("SELECT 1 FROM idempotency_keys WHERE key = 'stall-retry'"),
-      );
-      expect(claimed.rows).toEqual([]);
+        // B waits for the topic lock, gives up after 3 seconds, and is told to
+        // retry.
+        const key = { "idempotency-key": "stall-retry" };
+        const b1 = await publish(strict, member, topicT, key);
+        expect(b1.statusCode).toBe(503);
+        expect(b1.json()).toEqual({ error: "busy" });
+        // The rolled-back attempt freed the key.
+        const claimed = await withAllWorkspaces(db, (c) =>
+          c.query("SELECT 1 FROM idempotency_keys WHERE key = 'stall-retry'"),
+        );
+        expect(claimed.rows).toEqual([]);
 
-      // C (topic U, another workspace) and C' (topic V, the same workspace as
-      // T) are not stalled while A is held.
-      const c = await publish(t.app, other, topicU);
-      const cPrime = await publish(t.app, owner, topicV);
-      expect(c.statusCode).toBe(201);
-      expect(cPrime.statusCode).toBe(201);
-      expect(aDone).toBe(false);
+        // C (topic U, another workspace) and C' (topic V, the same workspace as
+        // T) are not stalled while A is held.
+        const c = await publish(t.app, other, topicU);
+        const cPrime = await publish(t.app, owner, topicV);
+        expect(c.statusCode).toBe(201);
+        expect(cPrime.statusCode).toBe(201);
+        expect(aDone).toBe(false);
 
-      const aResult = await a;
-      expect(aResult.statusCode).toBe(201);
+        const aResult = await a;
+        expect(aResult.statusCode).toBe(201);
 
-      // The retry, with the same key, after A has committed.
-      const b2 = await publish(t.app, member, topicT, key);
-      expect(b2.statusCode).toBe(201);
-      expect(b2.json<Sent>().seq).toBe(aResult.json<Sent>().seq + 1);
-      const again = await publish(t.app, member, topicT, key);
-      expect(again.json()).toEqual(b2.json());
+        // The retry, with the same key, after A has committed.
+        const b2 = await publish(t.app, member, topicT, key);
+        expect(b2.statusCode).toBe(201);
+        expect(b2.json<Sent>().seq).toBe(aResult.json<Sent>().seq + 1);
+        const again = await publish(t.app, member, topicT, key);
+        expect(again.json()).toEqual(b2.json());
 
-      // Exactly one message from B.
-      const mine = await withContext(
-        t.pool,
-        { accountId: member.accountId },
-        (tx) =>
-          tx.query<{ n: number }>(
-            `SELECT count(*)::int AS n FROM messages
+        // Exactly one message from B.
+        const mine = await withContext(
+          t.pool,
+          { accountId: member.accountId },
+          (tx) =>
+            tx.query<{ n: number }>(
+              `SELECT count(*)::int AS n FROM messages
               WHERE topic_id = $1 AND sender_account_id = $2`,
-            [topicT, member.accountId],
-          ),
-      );
-      expect(mine.rows[0]?.n).toBe(1);
-    } finally {
-      await db.end();
-      await slow.close();
-      await strict.close();
-    }
-  }, TIMEOUT);
+              [topicT, member.accountId],
+            ),
+        );
+        expect(mine.rows[0]?.n).toBe(1);
+      } finally {
+        await db.end();
+        await slow.close();
+        await strict.close();
+      }
+    },
+    TIMEOUT,
+  );
 });
