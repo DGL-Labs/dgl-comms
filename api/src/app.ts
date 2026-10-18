@@ -23,7 +23,11 @@ export interface AppDeps {
   onSessionRevoked?: (sessionIds: string[]) => void;
   logSink?: LogSink;
   // Tests only. Never read from config or the environment.
-  testHooks?: { skipPermissionChecks?: boolean };
+  testHooks?: {
+    skipPermissionChecks?: boolean;
+    holdAfterSeqMs?: number;
+    lockTimeoutMs?: number;
+  };
 }
 
 export function buildApp(deps: AppDeps): FastifyInstance {
@@ -41,6 +45,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     },
     logger,
     skipPermissionChecks: deps.testHooks?.skipPermissionChecks === true,
+    holdAfterSeqMs: deps.testHooks?.holdAfterSeqMs ?? null,
+    lockTimeoutMs: deps.testHooks?.lockTimeoutMs ?? null,
     sessionsRevoked(sessionIds) {
       if (sessionIds.length === 0) return;
       try {

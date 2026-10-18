@@ -45,6 +45,13 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
       ctx.pool,
       { accountId: me },
       async (tx, scope) => {
+        // The pause flag. A missing row fails closed.
+        const flags = await tx.query<{ paused: boolean }>(
+          "SELECT signup_paused AS paused FROM service_limits",
+        );
+        if (first(flags.rows)?.paused !== false) {
+          return { kind: "paused" as const };
+        }
         // One workspace creation per account at a time, so the cap cannot be
         // raced.
         await tx.query("SELECT id FROM accounts WHERE id = $1 FOR UPDATE", [
@@ -114,6 +121,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, ctx: Ctx): void {
       },
     );
 
+    if (outcome.kind === "paused") {
+      request.reason = "signup_paused";
+      return reply.code(503).send({ error: "unavailable" });
+    }
     if (outcome.kind === "too_many") {
       request.reason = "workspace_limit";
       return reply.code(409).send({ error: "workspace_limit" });

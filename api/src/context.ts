@@ -31,6 +31,11 @@ export interface Ctx {
   // Test hook: skips the permission check, to prove that row-level security
   // holds by itself. Always false outside tests.
   skipPermissionChecks: boolean;
+  // Test hooks for publish, from AppDeps.testHooks only, never from config:
+  // hold the transaction after it takes its seq, and override lock_timeout.
+  // Null outside tests. To be excluded from production builds later.
+  holdAfterSeqMs: number | null;
+  lockTimeoutMs: number | null;
   // Wraps the onSessionRevoked hook; ignores empty lists and hook errors.
   sessionsRevoked(sessionIds: string[]): void;
 }

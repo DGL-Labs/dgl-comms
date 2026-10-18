@@ -19,6 +19,7 @@ import {
 import { hashToken } from "./tokens.ts";
 import { registerInvitationRoutes } from "./invitation-routes.ts";
 import { registerKeyRoutes } from "./key-routes.ts";
+import { registerPublishRoutes } from "./publish.ts";
 import { registerTopicRoutes } from "./topic-routes.ts";
 import { registerWorkspaceRoutes } from "./workspace-routes.ts";
 
@@ -70,6 +71,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
   registerInvitationRoutes(app, ctx);
   registerTopicRoutes(app, ctx);
   registerKeyRoutes(app, ctx);
+  registerPublishRoutes(app, ctx);
 
   // POST /v1/auth/signup
   app.post("/v1/auth/signup", async (request, reply) => {
@@ -93,6 +95,18 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx): void {
     const domain = email.slice(email.lastIndexOf("@") + 1);
     if (isBlockedDomain(ctx.blocklist, domain)) {
       return signupRefused(request, reply, 403, "disposable_domain");
+    }
+
+    // The pause flag (disk guard, or an operator). Nothing is recorded for a
+    // refused sign-up. A missing row fails closed.
+    const flags = await withTx(ctx.pool, (tx) =>
+      tx.query<{ paused: boolean }>(
+        "SELECT signup_paused AS paused FROM service_limits",
+      ),
+    );
+    if (first(flags.rows)?.paused !== false) {
+      request.reason = "signup_paused";
+      return reply.code(503).send({ error: "unavailable" });
     }
 
     const ip = clientIp(ctx, request);
