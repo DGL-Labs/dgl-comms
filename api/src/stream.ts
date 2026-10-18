@@ -579,7 +579,17 @@ export function registerStreamRoutes(
           return first(found.rows)?.workspace_id;
         },
         "workspace.read",
-        async (_tx, workspaceId) => ({ kind: "ok" as const, workspaceId }),
+        async (tx, workspaceId) => {
+          // A suspended workspace does not stream: it looks like no topic.
+          const workspace = await tx.query<{ status: string }>(
+            "SELECT status FROM workspaces WHERE id = $1",
+            [workspaceId],
+          );
+          if (first(workspace.rows)?.status !== "active") {
+            return { kind: "not_found" as const };
+          }
+          return { kind: "ok" as const, workspaceId };
+        },
       );
       if (access.kind === "not_found" || access.kind === "forbidden") {
         return deny(request, reply, access);

@@ -222,6 +222,33 @@ describe("T-LOGS", () => {
     expect(refused.some((e) => e.reason === "key_in_query")).toBe(true);
   });
 
+  it("logs LISTEN outages and why streams end, by reason code only", () => {
+    const entries = readFileSync(inject("logFile"), "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as LogEntry);
+    for (const event of ["listen_down", "listen_up"]) {
+      const lines = entries.filter((e) => e.event === event);
+      expect(lines.length, event).toBeGreaterThan(0);
+      for (const line of lines) {
+        expect(line.reason).toBe(event);
+        expect(line.route).toBeNull();
+        expect(line.status).toBeNull();
+      }
+    }
+    const reasons = new Set(
+      entries.filter((e) => e.event === "stream_end").map((e) => e.reason),
+    );
+    for (const reason of [
+      "client_closed",
+      "revoked",
+      "token_expired",
+      "server_closing",
+    ]) {
+      expect(reasons.has(reason), `stream end ${reason}`).toBe(true);
+    }
+  });
+
   it("never contains a test email, token, JWT or header value", () => {
     const log = readFileSync(inject("logFile"), "utf8");
     const secrets = readFileSync(inject("secretsFile"), "utf8")

@@ -279,6 +279,9 @@ export async function appWithHooks(
     lockTimeoutMs?: number;
     streamKeepaliveMs?: number;
     streamProcessCap?: number;
+    streamRecheckMs?: number;
+    streamPollMs?: number;
+    listenBackoffMs?: number;
   },
 ): Promise<FastifyInstance> {
   const logFile = inject("logFile");
@@ -330,6 +333,48 @@ export async function until(check: () => boolean, ms = 10_000): Promise<void> {
 // Starts the app on a free port of 127.0.0.1 and returns its base URL.
 export function listenOnFreePort(app: FastifyInstance): Promise<string> {
   return app.listen({ host: "127.0.0.1", port: 0 });
+}
+
+// The backends of the LISTEN connections of every app on the database, found
+// by application_name.
+export async function listenPids(pool: Pool): Promise<number[]> {
+  const res = await pool.query<{ pid: number }>(
+    `SELECT pid FROM pg_stat_activity
+      WHERE application_name = 'pingzo_listen' AND pid <> pg_backend_pid()
+      ORDER BY pid`,
+  );
+  return res.rows.map((row) => row.pid);
+}
+
+// Kills every LISTEN backend, as pingzo_app (same role, so it may). Returns the
+// pids that were killed.
+export async function killListeners(pool: Pool): Promise<number[]> {
+  const pids = await listenPids(pool);
+  await pool.query(
+    "SELECT pg_terminate_backend(p) FROM unnest($1::int[]) AS p",
+    [pids],
+  );
+  return pids;
+}
+
+// Waits until none of the given backends is left.
+export async function backendsGone(pool: Pool, pids: number[]): Promise<void> {
+  const end = Date.now() + 10_000;
+  for (;;) {
+    const left = (await listenPids(pool)).filter((pid) => pids.includes(pid));
+    if (left.length === 0) return;
+    if (Date.now() > end) throw new Error("a LISTEN backend did not go");
+    await sleepMs(20);
+  }
+}
+
+// The session id inside an access token (the sid claim), for a forged hint.
+export function sessionIdOf(accessToken: string): string {
+  const payload = accessToken.split(".")[1] ?? "";
+  const claims = JSON.parse(
+    Buffer.from(payload, "base64url").toString("utf8"),
+  ) as { sid: string };
+  return claims.sid;
 }
 
 // GET /v1/topics/:id/stream, resolved once the response headers are in.
