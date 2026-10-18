@@ -10,6 +10,8 @@ export interface Config {
   allowlist: ReadonlySet<string>;
   trustedProxies: TrustedProxies;
   blocklistPath: string;
+  // Host disk status file for the disk guard. Optional: null when unset.
+  diskStatusPath: string | null;
   host: string;
   port: number;
 }
@@ -66,6 +68,11 @@ export function loadConfig(env: Env): Config {
     allowlist,
     trustedProxies: parseTrustedProxies(env.PINGZO_TRUSTED_PROXIES ?? ""),
     blocklistPath: env.PINGZO_BLOCKLIST_PATH ?? DEFAULT_BLOCKLIST_PATH,
+    diskStatusPath:
+      env.PINGZO_DISK_STATUS_PATH === undefined ||
+      env.PINGZO_DISK_STATUS_PATH === ""
+        ? null
+        : env.PINGZO_DISK_STATUS_PATH,
     host: env.PINGZO_HOST ?? "127.0.0.1",
     port,
   };

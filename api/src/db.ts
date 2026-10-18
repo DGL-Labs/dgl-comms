@@ -187,6 +187,13 @@ export async function holdTx(tx: Db, ms: number): Promise<void> {
   await tx.query("SELECT pg_sleep($1::float8)", [ms / 1000]);
 }
 
+// The SQLSTATE of a database error, if it has one.
+export function pgCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
 export function first<R>(rows: R[]): R | undefined {
   return rows[0];
 }
