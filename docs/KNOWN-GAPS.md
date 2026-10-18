@@ -69,7 +69,7 @@ The T-ROLE check that no app role is a member of `pingzo_keyresolver` proves onl
 
 No test races two transfers against the target's cap, or account deletion against a transfer. Their serialization (the account row lock, then workspaces) comes from reading the code, not from a test.
 
-## C-1d (publish and limits)
+## C-1d (publish, limits, disk guard and pool)
 
 Accepted for C-1d. Each has a later step that closes it.
 
@@ -93,6 +93,20 @@ The global ceiling is checked and counted in one statement, but writers on diffe
 - The publish permission check (`message.post`) does not lock the workspace row, unlike `authorize` for other actions, so publishes to different topics of one workspace do not wait on each other. A membership change that commits between the preflight and the main transaction is seen by the second check; one that commits after it is not.
 - A person's message has the sender label `Member` for now. The sender account id is stored; a display name comes with the clients.
 - A committed idempotency row whose message has since been deleted (a topic deleted with its messages) answers 409 `idempotency_conflict` until the row is 24 hours old.
+
+### Flag clearing is admin by convention (A6)
+
+`clearServiceFlag` is the only code that clears `signup_paused` or `publish_paused_non_internal`, and it writes an `audit_log` row (`service.flag_clear`). There is no HTTP admin route yet, and the `pingzo_maintainer` role can also `UPDATE` those two columns directly, so "only a logged admin action clears a flag" holds by convention until the admin surface exists. The role is test bootstrap only; production provisioning is at C-1k.
+
+### Disk guard (A6)
+
+- Only stage (a) is built: the check logic and its tests. Nothing calls it yet; its process arrives at C-1f, and alert delivery at C-1h (`service_alerts.delivered_at` stays null).
+- The host status file is JSON, `{"used_percent": 83.5}`. `PINGZO_DISK_STATUS_PATH` is optional; unset, missing, unreadable or malformed gives one `disk_status_missing` alert and never a startup failure.
+- An alert is raised when its flag flips from clear to set. After an admin clears a flag, the next reading at or over the threshold raises the alert again.
+
+### Busy mapping (A7)
+
+Only SQLSTATE `55P03` and the pool's connection timeout map to 503 `busy`. A `statement_timeout` (`57014`) is still a 500.
 
 ## Closed at C-1d
 
