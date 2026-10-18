@@ -12,6 +12,8 @@ declare module "vitest" {
     dbUrl: string;
     // pingzo_owner, for tests that must change a limit the app cannot change.
     ownerUrl: string;
+    // pingzo_maintainer, for the disk guard tests.
+    maintainerUrl: string;
     logFile: string;
     secretsFile: string;
   }
@@ -57,6 +59,7 @@ export default async function setup({
   // Hex only, so inlining into ALTER ROLE is safe.
   const ownerPassword = randomBytes(24).toString("hex");
   const appPassword = randomBytes(24).toString("hex");
+  const maintainerPassword = randomBytes(24).toString("hex");
 
   await asSuperuser(superUrl, `CREATE DATABASE "${database}"`);
   const bootstrap = readFileSync(BOOTSTRAP_SQL, "utf8");
@@ -64,7 +67,8 @@ export default async function setup({
     urlFor(superUrl, database),
     `${bootstrap}
      ALTER ROLE pingzo_owner PASSWORD '${ownerPassword}';
-     ALTER ROLE pingzo_app PASSWORD '${appPassword}';`,
+     ALTER ROLE pingzo_app PASSWORD '${appPassword}';
+     ALTER ROLE pingzo_maintainer PASSWORD '${maintainerPassword}';`,
   );
   await runMigrations(
     urlFor(superUrl, database, "pingzo_owner", ownerPassword),
@@ -105,6 +109,10 @@ export default async function setup({
   provide(
     "ownerUrl",
     urlFor(superUrl, database, "pingzo_owner", ownerPassword),
+  );
+  provide(
+    "maintainerUrl",
+    urlFor(superUrl, database, "pingzo_maintainer", maintainerPassword),
   );
   provide("logFile", logFile);
   provide("secretsFile", secretsFile);

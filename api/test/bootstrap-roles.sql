@@ -28,6 +28,13 @@ BEGIN
     CREATE ROLE pingzo_counter NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEROLE NOCREATEDB;
   END IF;
   GRANT pingzo_counter TO pingzo_owner;
+  -- The disk guard's role (migration 0007). Test bootstrap only: production
+  -- provisioning is at C-1k. It can log in, but is not a superuser and does not
+  -- bypass RLS, and it gets no privilege on any tenant table.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pingzo_maintainer') THEN
+    CREATE ROLE pingzo_maintainer LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB;
+  END IF;
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO pingzo_maintainer', current_database());
   -- The owner role owns the database, so it can create the citext extension
   -- (a trusted extension) and own everything in the public schema.
   EXECUTE format('ALTER DATABASE %I OWNER TO pingzo_owner', current_database());
