@@ -115,6 +115,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   // The one LISTEN client of this process starts with the app (a failure to
   // start fails the app) and closes with it, after every stream has ended.
+  // Streams end in preClose: Fastify closes the HTTP server before onClose
+  // runs, and the server waits for open connections, which streams are.
   let listener: Listener | null = null;
   app.addHook("onReady", async () => {
     listener = await startListener(
@@ -123,8 +125,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       () => logger.log({ event: "listen_down", reason: "listen_down" }),
     );
   });
-  app.addHook("onClose", async () => {
+  app.addHook("preClose", async () => {
     streams.endAll("server_closing");
+  });
+  app.addHook("onClose", async () => {
     if (listener !== null) await listener.close();
     listener = null;
   });

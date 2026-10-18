@@ -403,9 +403,7 @@ describe("stream", () => {
         const one = await open(owner, topic, {}, "", url);
         const two = await open(member, topic, {}, "", url);
         const three = await open(owner, topic, {}, "", url);
-        expect([one.status, two.status, three.status]).toEqual([
-          200, 200, 429,
-        ]);
+        expect([one.status, two.status, three.status]).toEqual([200, 200, 429]);
       } finally {
         await app.close();
       }
