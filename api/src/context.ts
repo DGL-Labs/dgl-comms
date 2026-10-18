@@ -42,6 +42,8 @@ export interface Ctx {
   // Null outside tests.
   streamKeepaliveMs: number | null;
   streamProcessCap: number | null;
+  // The per-session stream cap, for the load job only (3 otherwise).
+  streamSessionCap: number | null;
   streamRecheckMs: number | null;
   streamPollMs: number | null;
   listenBackoffMs: number | null;

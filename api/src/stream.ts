@@ -245,6 +245,7 @@ export function registerStreamRoutes(
   const chains = new Map<string, Promise<void>>();
   const keepaliveMs = ctx.streamKeepaliveMs ?? KEEPALIVE_MS;
   const processCap = ctx.streamProcessCap ?? MAX_PER_PROCESS;
+  const sessionCap = ctx.streamSessionCap ?? MAX_PER_SESSION;
   const recheckMs = ctx.streamRecheckMs ?? RECHECK_MS;
   const pollMs = ctx.streamPollMs ?? POLL_MS;
   // Access re-checks run one after another, so a revocation that touches
@@ -261,7 +262,7 @@ export function registerStreamRoutes(
   // the cap together. Released once, when the stream ends or never opens.
   function reserve(sessionId: string): Slot {
     const mine = perSession.get(sessionId) ?? 0;
-    if (mine >= MAX_PER_SESSION) return { kind: "session" };
+    if (mine >= sessionCap) return { kind: "session" };
     if (total >= processCap) return { kind: "process" };
     perSession.set(sessionId, mine + 1);
     total += 1;

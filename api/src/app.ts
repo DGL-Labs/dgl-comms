@@ -33,6 +33,7 @@ export interface AppDeps {
     lockTimeoutMs?: number;
     streamKeepaliveMs?: number;
     streamProcessCap?: number;
+    streamSessionCap?: number;
     streamRecheckMs?: number;
     streamPollMs?: number;
     listenBackoffMs?: number;
@@ -62,6 +63,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     lockTimeoutMs: deps.testHooks?.lockTimeoutMs ?? null,
     streamKeepaliveMs: deps.testHooks?.streamKeepaliveMs ?? null,
     streamProcessCap: deps.testHooks?.streamProcessCap ?? null,
+    streamSessionCap: deps.testHooks?.streamSessionCap ?? null,
     streamRecheckMs: deps.testHooks?.streamRecheckMs ?? null,
     streamPollMs: deps.testHooks?.streamPollMs ?? null,
     listenBackoffMs: deps.testHooks?.listenBackoffMs ?? null,

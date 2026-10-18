@@ -279,6 +279,7 @@ export async function appWithHooks(
     lockTimeoutMs?: number;
     streamKeepaliveMs?: number;
     streamProcessCap?: number;
+    streamSessionCap?: number;
     streamRecheckMs?: number;
     streamPollMs?: number;
     listenBackoffMs?: number;

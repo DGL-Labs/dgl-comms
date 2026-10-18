@@ -112,6 +112,35 @@ Only SQLSTATE `55P03` and the pool's connection timeout map to 503 `busy`. A `st
 
 Deleting an account does not yet remove three C-1d values that point at it: the sender id on its messages (`messages.sender_account_id`, no foreign key; the messages belong to the workspace and stay), its idempotency rows (`idempotency_keys.caller = 'a:<id>'`), and its rate bucket (`rate_buckets` key `acct:<id>`). The app has no DELETE on those two tables and no UPDATE on that column, and widening its grants is not part of C-1d. The C-1g purge removes or clears all three; until then the account id stays in those rows.
 
+## C-1e (stream, LISTEN, revocation, long-poll)
+
+Accepted for C-1e. Each has a later step that closes it.
+
+### Cloudflare buffering (PC ruling D1)
+
+T-SSE-CF (Cloudflare buffering) is deferred to C-1l, on the real deployment (PC ruling D1). C-1e proves SSE locally and in CI. The long-poll fallback (B6) is built behind a flag in case Cloudflare buffers the stream.
+
+### Revocation is a hint plus a re-check (PC ruling 1143)
+
+- Database triggers send `pingzo_acl` with ids only. They fire on member removal or a role change, session revoke, account deletion or status change, topic delete, and workspace suspension or delete.
+- Any database role can send `pg_notify`. So a notification only makes the matching streams re-check their access; it never closes a stream by itself. A forged notification costs one re-check per matching stream, and closes nothing.
+- A role change re-checks but cannot close a stream today, because every role has `workspace.read`.
+- With the notification channel down, revocation relies on the 60-second re-check.
+
+### Suspended workspaces
+
+The stream and the long-poll refuse a suspended workspace. Other read routes still allow it: `decide()` does not check the status (the same as C-1c note 12). The admin surface (C-1f onward) decides the rule for the rest.
+
+### Delivery details
+
+- The `pingzo_msg` payload is `<topic_id>:<seq>`, a hint only. Rows are loaded in the workspace recorded on the open stream, and access is enforced by the re-check, not per row.
+- A long-poll that finds nothing, and then misses a hint in the moment before it starts waiting, answers at its next 5-second re-read instead.
+- The stream and long-poll caps (3 per session, 2,000 per process) are counted in memory, per server process.
+
+### Test hooks
+
+`AppDeps.testHooks` gains `streamKeepaliveMs`, `streamProcessCap`, `streamSessionCap`, `streamRecheckMs`, `streamPollMs` and `listenBackoffMs`. They come from `deps` only, never from config or the environment, like the C-1d hooks, and are to be excluded from production builds later.
+
 ## Closed at C-1d
 
 - Context is wider than the path (NOTE 7): `withPathContext` in `db.ts` sets the context to the path workspace intersected with the caller's memberships; it never adds one.
