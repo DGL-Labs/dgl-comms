@@ -12,6 +12,7 @@ import type { EmailSender } from "./email.ts";
 import { createLogger } from "./log.ts";
 import type { LogSink } from "./log.ts";
 import { registerRoutes } from "./routes.ts";
+import { registerLongPollRoutes } from "./long-poll.ts";
 import { registerStreamRoutes } from "./stream.ts";
 
 export interface AppDeps {
@@ -122,6 +123,12 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   registerRoutes(app, ctx);
   const streams = registerStreamRoutes(app, ctx);
+  const polls = registerLongPollRoutes(
+    app,
+    ctx,
+    streams,
+    deps.config.longPollOn,
+  );
 
   // The one LISTEN client of this process starts with the app (a failure to
   // start fails the app) and closes with it, after every stream has ended.
@@ -139,8 +146,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     return startListener(
       deps.config.listenUrl,
       (channel, payload) => {
-        if (channel === "pingzo_msg") streams.notify(payload);
-        else streams.aclNotify(payload);
+        if (channel === "pingzo_msg") {
+          streams.notify(payload);
+          polls.wake(payload);
+        } else streams.aclNotify(payload);
       },
       onListenDown,
     );
@@ -181,6 +190,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     listener = await connectListener();
   });
   app.addHook("preClose", async () => {
+    polls.endAll();
     streams.endAll("server_closing");
   });
   app.addHook("onClose", async () => {

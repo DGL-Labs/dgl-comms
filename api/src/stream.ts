@@ -30,7 +30,7 @@ const SEQ = /^[0-9]{1,15}$/;
 const MESSAGE_COLUMNS =
   "id, topic_id, seq, title, body, sender_label, sender_kind, created_at";
 
-interface MessageRow {
+export interface MessageRow {
   id: string;
   topic_id: string;
   seq: string;
@@ -41,12 +41,12 @@ interface MessageRow {
   created_at: Date;
 }
 
-interface Gap {
+export interface Gap {
   from: number;
   to: number;
 }
 
-interface Replay {
+export interface Replay {
   gaps: Gap[];
   rows: MessageRow[];
   // The topic's last_seq when the replay was read. Everything up to it is
@@ -79,7 +79,7 @@ interface Stream {
   end(reason: string): void;
 }
 
-type Slot =
+export type Slot =
   | { kind: "ok"; release(): void }
   | { kind: "session" }
   | { kind: "process" };
@@ -96,6 +96,9 @@ export interface StreamHub {
   listenUp(): void;
   // Ends every open stream and refuses nothing new from then on.
   endAll(reason: string): void;
+  // Takes one of the caller's slots (3 per session, 2,000 per process). The
+  // long-poll route (B6) counts against the same slots.
+  reserve(sessionId: string): Slot;
 }
 
 function idParam(request: FastifyRequest): string | null {
@@ -104,8 +107,9 @@ function idParam(request: FastifyRequest): string | null {
   return isUuid(value) ? value : null;
 }
 
-function messageFrame(row: MessageRow): string {
-  const data = JSON.stringify({
+// A message as a client sees it, on the stream and from the long-poll route.
+export function messageData(row: MessageRow) {
+  return {
     id: row.id,
     topic_id: row.topic_id,
     seq: Number(row.seq),
@@ -114,7 +118,11 @@ function messageFrame(row: MessageRow): string {
     sender_label: row.sender_label,
     sender_kind: row.sender_kind,
     created_at: row.created_at,
-  });
+  };
+}
+
+function messageFrame(row: MessageRow): string {
+  const data = JSON.stringify(messageData(row));
   return `id: ${row.seq}\nevent: message\ndata: ${data}\n\n`;
 }
 
@@ -144,7 +152,7 @@ function sendMessage(stream: Stream, row: MessageRow): void {
 // One short transaction, under the same context as the access check: the
 // caller's memberships cut down to the topic's workspace. It reads the topic's
 // counters and what is to be replayed (B1 step 3, B3).
-async function readReplay(
+export async function readReplay(
   ctx: Ctx,
   accountId: string,
   workspaceId: string,
@@ -190,6 +198,35 @@ async function readReplay(
         [topicId, start, last, REPLAY_MAX],
       );
       return { gaps, rows: found.rows, last };
+    },
+  );
+}
+
+// The access check of a new stream or long-poll (B1 step 1), in one short
+// transaction: the caller's membership with workspace.read, found and narrowed
+// by inFoundWorkspace. A suspended workspace looks like no topic (PC ruling
+// 1143). Returns the topic's workspace id.
+export function streamAccess(ctx: Ctx, accountId: string, topicId: string) {
+  return inFoundWorkspace(
+    ctx,
+    accountId,
+    async (tx) => {
+      const found = await tx.query<{ workspace_id: string }>(
+        "SELECT workspace_id FROM topics WHERE id = $1",
+        [topicId],
+      );
+      return first(found.rows)?.workspace_id;
+    },
+    "workspace.read",
+    async (tx, workspaceId) => {
+      const workspace = await tx.query<{ status: string }>(
+        "SELECT status FROM workspaces WHERE id = $1",
+        [workspaceId],
+      );
+      if (first(workspace.rows)?.status !== "active") {
+        return { kind: "not_found" as const };
+      }
+      return { kind: "ok" as const, workspaceId };
     },
   );
 }
@@ -568,29 +605,7 @@ export function registerStreamRoutes(
 
     try {
       // Step 1: access. A short transaction that returns the workspace id.
-      const access = await inFoundWorkspace(
-        ctx,
-        session.accountId,
-        async (tx) => {
-          const found = await tx.query<{ workspace_id: string }>(
-            "SELECT workspace_id FROM topics WHERE id = $1",
-            [topicId],
-          );
-          return first(found.rows)?.workspace_id;
-        },
-        "workspace.read",
-        async (tx, workspaceId) => {
-          // A suspended workspace does not stream: it looks like no topic.
-          const workspace = await tx.query<{ status: string }>(
-            "SELECT status FROM workspaces WHERE id = $1",
-            [workspaceId],
-          );
-          if (first(workspace.rows)?.status !== "active") {
-            return { kind: "not_found" as const };
-          }
-          return { kind: "ok" as const, workspaceId };
-        },
-      );
+      const access = await streamAccess(ctx, session.accountId, topicId);
       if (access.kind === "not_found" || access.kind === "forbidden") {
         return deny(request, reply, access);
       }
@@ -722,5 +737,5 @@ export function registerStreamRoutes(
     }
   });
 
-  return { notify, aclNotify, listenDown, listenUp, endAll };
+  return { notify, aclNotify, listenDown, listenUp, endAll, reserve };
 }

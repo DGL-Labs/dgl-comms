@@ -7,6 +7,8 @@ export interface Config {
   // The direct connection for LISTEN (past any pooler). Falls back to
   // databaseUrl when PINGZO_LISTEN_URL is unset or empty.
   listenUrl: string;
+  // The long-poll fallback (B6): off unless PINGZO_LONG_POLL is "true".
+  longPollOn: boolean;
   jwtKey: string;
   jwtKid: string;
   allowlistOn: boolean;
@@ -70,6 +72,7 @@ export function loadConfig(env: Env): Config {
     databaseUrl,
     listenUrl:
       listenUrl === undefined || listenUrl === "" ? databaseUrl : listenUrl,
+    longPollOn: env.PINGZO_LONG_POLL === "true",
     jwtKey,
     jwtKid,
     allowlistOn: flag === "true",

@@ -52,6 +52,16 @@ describe("loadConfig", () => {
     ).toBe("postgres://direct");
   });
 
+  it("keeps the long-poll fallback off unless PINGZO_LONG_POLL is true", () => {
+    expect(loadConfig(BASE).longPollOn).toBe(false);
+    expect(loadConfig({ ...BASE, PINGZO_LONG_POLL: "yes" }).longPollOn).toBe(
+      false,
+    );
+    expect(loadConfig({ ...BASE, PINGZO_LONG_POLL: "true" }).longPollOn).toBe(
+      true,
+    );
+  });
+
   it("does not put the JWT key in an error message", () => {
     const env = { ...BASE, PINGZO_JWT_KEY: "short-secret-value" };
     expect(() => loadConfig(env)).toThrow(/PINGZO_JWT_KEY/);
