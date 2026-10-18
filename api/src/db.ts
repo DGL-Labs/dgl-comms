@@ -192,29 +192,49 @@ export interface Listener {
   close(): Promise<void>;
 }
 
-// The one LISTEN client of a process: a direct connection that is not part of
-// the pool, on pingzo_msg. onNotify gets the raw payload, which is a hint and
-// nothing more. onDown runs when the connection fails (it may run twice for
-// one failure); this client does not reconnect.
+export type ListenChannel = "pingzo_msg" | "pingzo_acl";
+
+// The application_name of the LISTEN connection. A test finds the backend by it.
+export const LISTEN_APPLICATION_NAME = "pingzo_listen";
+
+// One LISTEN connection: a direct connection that is not part of the pool, on
+// pingzo_msg (a message was published) and pingzo_acl (access changed).
+// onNotify gets the channel and the raw payload, which is a hint and nothing
+// more. onDown runs once when the connection fails or ends; this function does
+// not reconnect (the caller starts a new one).
 export async function startListener(
   connectionString: string,
-  onNotify: (payload: string) => void,
+  onNotify: (channel: ListenChannel, payload: string) => void,
   onDown: () => void,
 ): Promise<Listener> {
-  const client = new pg.Client({ connectionString });
+  const client = new pg.Client({
+    connectionString,
+    application_name: LISTEN_APPLICATION_NAME,
+  });
   let closing = false;
+  let down = false;
+  // A failure before both LISTENs are in place is thrown by this function
+  // instead of reported through onDown.
+  let ready = false;
+  const failed = () => {
+    if (closing || down || !ready) return;
+    down = true;
+    client.end().catch(() => undefined);
+    onDown();
+  };
   client.on("notification", (message) => {
-    if (message.channel === "pingzo_msg") onNotify(message.payload ?? "");
+    if (closing || down) return;
+    if (message.channel === "pingzo_msg" || message.channel === "pingzo_acl") {
+      onNotify(message.channel, message.payload ?? "");
+    }
   });
-  client.on("error", () => {
-    if (!closing) onDown();
-  });
-  client.on("end", () => {
-    if (!closing) onDown();
-  });
+  client.on("error", failed);
+  client.on("end", failed);
   try {
     await client.connect();
     await client.query("LISTEN pingzo_msg");
+    await client.query("LISTEN pingzo_acl");
+    ready = true;
   } catch (error) {
     closing = true;
     await client.end().catch(() => undefined);

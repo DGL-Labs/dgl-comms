@@ -121,7 +121,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.addHook("onReady", async () => {
     listener = await startListener(
       deps.config.listenUrl,
-      (payload) => streams.notify(payload),
+      (channel, payload) => {
+        if (channel === "pingzo_msg") streams.notify(payload);
+      },
       () => logger.log({ event: "listen_down", reason: "listen_down" }),
     );
   });
