@@ -153,6 +153,40 @@ export function withKeyContext<T>(
   });
 }
 
+// One statement in a transaction of its own, for the counters (rate_buckets and
+// the usage tables hold numbers, not tenant rows, and have no row-level
+// security). It commits at once, so a debit stays even if the request fails
+// later.
+export function autocommit<R extends QueryResultRow = QueryResultRow>(
+  pool: Pool,
+  text: string,
+  values?: unknown[],
+): Promise<QueryResult<R>> {
+  return pool.query<R>(text, values);
+}
+
+// Test hook (AppDeps.testHooks.lockTimeoutMs): for this transaction only, lock
+// waits last this long. statement_timeout follows, so that a wait this long is
+// not cut short by it.
+export async function setLockTimeout(tx: Db, ms: number): Promise<void> {
+  const wait = Math.max(0, Math.floor(ms));
+  await tx.query("SELECT set_config('lock_timeout', $1, true)", [`${wait}ms`]);
+  await tx.query("SELECT set_config('statement_timeout', $1, true)", [
+    `${wait + 5000}ms`,
+  ]);
+}
+
+// Test hook (AppDeps.testHooks.holdAfterSeqMs): holds the transaction open for
+// ms, with the statement and idle-in-transaction timeouts off on this
+// transaction's connection only.
+export async function holdTx(tx: Db, ms: number): Promise<void> {
+  await tx.query("SELECT set_config('statement_timeout', '0', true)");
+  await tx.query(
+    "SELECT set_config('idle_in_transaction_session_timeout', '0', true)",
+  );
+  await tx.query("SELECT pg_sleep($1::float8)", [ms / 1000]);
+}
+
 export function first<R>(rows: R[]): R | undefined {
   return rows[0];
 }
