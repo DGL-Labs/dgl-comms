@@ -481,7 +481,12 @@ export function registerPublishRoutes(app: FastifyInstance, ctx: Ctx): void {
 
     // Step 3: the workspace and global debits, each in its own statement.
     if (!(await takeWorkspaceToken(ctx.pool, pre.workspaceId, pre.perMinute))) {
-      return limited(request, reply, "workspace_rate_limited", "rate_limited");
+      return limited(
+        request,
+        reply,
+        "workspace_rate_limited",
+        "workspace_rate_limited",
+      );
     }
     if (!(await takeDailyMessage(ctx.pool, pre.workspaceId, pre.perDay))) {
       request.reason = "daily_limit";

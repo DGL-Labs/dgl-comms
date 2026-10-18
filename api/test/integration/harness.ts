@@ -271,7 +271,11 @@ export async function addMember(
 // A second app on the same database, with a test hook set.
 export async function appWithHooks(
   t: TestApp,
-  testHooks: { skipPermissionChecks?: boolean },
+  testHooks: {
+    skipPermissionChecks?: boolean;
+    holdAfterSeqMs?: number;
+    lockTimeoutMs?: number;
+  },
 ): Promise<FastifyInstance> {
   const logFile = inject("logFile");
   const app = buildApp({

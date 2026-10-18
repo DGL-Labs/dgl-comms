@@ -71,6 +71,19 @@ describe("T-ROLE", () => {
     }
   });
 
+  it("has SELECT, INSERT, UPDATE but no DELETE on the counters and idempotency_keys", async () => {
+    const res = await pool.query<{ t: string; p: string; ok: boolean }>(
+      `SELECT t, p, has_table_privilege(current_user, t, p) AS ok
+         FROM unnest(ARRAY['rate_buckets', 'workspace_usage_daily',
+                           'global_usage_minute', 'idempotency_keys']) AS t,
+              unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS p`,
+    );
+    expect(res.rows).toHaveLength(16);
+    for (const row of res.rows) {
+      expect(row.ok, `${row.t} ${row.p}`).toBe(row.p !== "DELETE");
+    }
+  });
+
   it("has no TRUNCATE on any table", async () => {
     const res = await pool.query<{ t: string; ok: boolean }>(
       `SELECT c.relname AS t, has_table_privilege(current_user, c.oid, 'TRUNCATE') AS ok
