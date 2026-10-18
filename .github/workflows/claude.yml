@@ -3,6 +3,10 @@
 # cannot change the allowlist, tools or guards that apply to its own run (G5 round 1, MUST 1).
 # Every run waits for approval on environment `claude` (Taylor is the required reviewer; deployments limited to main).
 # No Bash tool, so no repository script runs while the key is present. Tests run in the secret-less ci.yml.
+# Project-config guard (PRIVATE-REPO-GATE-DESIGN-r2 section 2.3, M2; REVIEW-GUARD-M2-1): the action loads a root
+# .mcp.json from the PR it checks out and always enables its servers. A run is refused if the PR's diff or the PR head
+# tree holds .mcp.json, CLAUDE.md, CLAUDE.local.md or .claude/, if the diff touches .github/, or if main holds any of the
+# first four; the builder may not write those paths; and a last step fails the run if the PR head moved during it.
 name: claude
 
 on:
@@ -50,10 +54,57 @@ jobs:
             *) echo "Refused: PR author '${author}' is not on the allowlist." >&2; exit 1 ;;
           esac
           echo "Guard passed: same-repository PR by ${author}."
+      # M2: the action switches to the PR branch itself and loads Claude Code project config from it (.mcp.json
+      # servers start a command with the key in the job). Checked before the key is used, on both the PR's diff (all
+      # pages; a rename counts by its old name too; refused if the list may be cut off) and the full head tree (refused
+      # if the listing is truncated). Paths come from the API and are only matched and printed escaped, never run.
+      - name: Guard - no project config in the PR diff or head tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          config='(^|/)\.mcp\.json$|(^|/)CLAUDE(\.local)?\.md$|(^|/)\.claude(/|$)'
+          refuse() {
+            echo "Refused: $1" >&2
+            if [ -n "${2:-}" ]; then printf '%s\n' "$2" | while IFS= read -r p; do printf '  %q\n' "$p" >&2; done; fi
+            exit 1
+          }
+          read -r head_sha changed < <(gh api "repos/${REPO}/pulls/${PR}" --jq '[.head.sha, .changed_files] | @tsv')
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || refuse "unreadable PR head SHA"
+          [[ "$changed" =~ ^[0-9]+$ ]] || refuse "unreadable changed_files"
+          # The files API returns at most 3000 entries and does not fail when it cuts the list.
+          [ "$changed" -le 3000 ] || refuse "the PR changes ${changed} files; the file list is capped at 3000"
+          rows="$(gh api --paginate "repos/${REPO}/pulls/${PR}/files" --jq '.[] | [.filename, (.previous_filename // "")] | @tsv')"
+          listed="$(printf '%s' "$rows" | grep -c '' || true)"
+          [ "$listed" -eq "$changed" ] || refuse "the API listed ${listed} files but the PR changes ${changed}"
+          names="$(printf '%s\n' "$rows" | tr '\t' '\n' | grep -v '^$' || true)"
+          bad="$(printf '%s\n' "$names" | grep -E "${config}|^\.github/" || true)"
+          [ -z "$bad" ] || refuse "the PR diff touches project config or workflow paths:" "$bad"
+          tree="$(gh api "repos/${REPO}/git/trees/${head_sha}?recursive=1")"
+          truncated="$(printf '%s' "$tree" | jq -r '.truncated')"
+          [ "$truncated" = "false" ] || refuse "the PR head tree listing is truncated or unreadable"
+          paths="$(printf '%s' "$tree" | jq -r '.tree[].path')"
+          tree_bad="$(printf '%s\n' "$paths" | grep -E "$config" || true)"
+          [ -z "$tree_bad" ] || refuse "the PR head tree holds project config:" "$tree_bad"
+          echo "GUARD_HEAD_SHA=${head_sha}" >> "$GITHUB_ENV"
+          echo "Guard passed at PR head ${head_sha}: ${changed} files, no project config or workflow change."
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
+      # M2: main itself must hold no project config either (this checkout is main).
+      - name: Guard - main holds no project config
+        run: |
+          set -euo pipefail
+          found="$(find . -path ./.git -prune -o \( -name .mcp.json -o -name CLAUDE.md -o -name CLAUDE.local.md -o -name .claude \) -print)"
+          if [ -n "$found" ]; then
+            echo "Refused: main holds project config:" >&2
+            printf '%s\n' "$found" | while IFS= read -r p; do printf '  %q\n' "$p" >&2; done
+            exit 1
+          fi
+          echo "Guard passed: main holds no project config."
       - uses: anthropics/claude-code-action@97c53473391bff1901034d4b454b5bac7ab7a029 # v1.0.239
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -69,4 +120,25 @@ jobs:
             --model claude-sonnet-5-5
             --max-turns 30
             --allowedTools "Read,Edit,Write,Glob,Grep"
-            --disallowedTools "Bash,Read(//proc/**),Read(//sys/**),Read(//home/runner/work/_temp/**),Read(//home/runner/work/_actions/**),Read(//home/runner/runners/**),Read(//home/runner/.*/**),Grep(//proc/**),Grep(//home/runner/work/_temp/**),Grep(//home/runner/work/_actions/**),Grep(//home/runner/runners/**),Glob(//proc/**)"
+            --disallowedTools "Edit(.mcp.json),Edit(CLAUDE.md),Edit(CLAUDE.local.md),Edit(.claude/**),Edit(//home/runner/work/_temp/**),Edit(//home/runner/.*/**),Glob(//home/runner/work/_temp/**),Bash,Read(//proc/**),Read(//sys/**),Read(//home/runner/work/_temp/**),Read(//home/runner/work/_actions/**),Read(//home/runner/runners/**),Read(//home/runner/.*/**),Grep(//proc/**),Grep(//home/runner/work/_temp/**),Grep(//home/runner/work/_actions/**),Grep(//home/runner/runners/**),Glob(//proc/**)"
+      # The action cannot be pinned to the guarded SHA. This detects, and fails the run on, a push to the PR by anyone
+      # but the builder between the guard and the end of the run (REVIEW-GUARD-M2-1 N3). It does not prevent it. The
+      # builder's own commits move the head forward and carry the github-actions[bot] author; anything else fails.
+      # It catches only non-hostile pushes: any pusher can set a github-actions[bot] author, and a force-push back to
+      # the guarded SHA before this step passes (REVIEW-GUARD-M2-2 R2-1).
+      - name: Check - PR head moved only by the builder since the guard
+        if: always() && env.GUARD_HEAD_SHA != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          now="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')"
+          if [ "$now" = "$GUARD_HEAD_SHA" ]; then echo "PR head unchanged: ${now}."; exit 0; fi
+          read -r status total others < <(gh api "repos/${REPO}/compare/${GUARD_HEAD_SHA}...${now}"             --jq '[.status, .total_commits, ([.commits[] | select(.author.login != "github-actions[bot]")] | length)] | @tsv')
+          if [ "$status" != "ahead" ] || [ "$others" != "0" ]; then
+            echo "::error::The PR head moved during the run other than by the builder (guarded ${GUARD_HEAD_SHA}, now ${now}, ${status}, ${others} of ${total} commits by others). Treat this run's output as unchecked." >&2
+            exit 1
+          fi
+          echo "PR head moved only by the builder: ${total} commits, now ${now}."
