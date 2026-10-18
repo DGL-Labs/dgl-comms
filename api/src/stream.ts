@@ -5,12 +5,24 @@ import { first, withPathContext, withWorkspaceTx } from "./db.ts";
 import { inFoundWorkspace } from "./found-scope.ts";
 import { requireSession } from "./guard.ts";
 import { isRecord, isUuid } from "./input.ts";
+import { can } from "./permissions.ts";
 import { keyInQuery } from "./publish.ts";
-import { deny, notFound } from "./workspaces.ts";
+import { deny, memberRole, notFound } from "./workspaces.ts";
 
 const ROUTE = "/v1/topics/:id/stream";
 const REPLAY_MAX = 500;
 const KEEPALIVE_MS = 25_000;
+// Every open stream re-checks its access this often, so a revocation holds
+// while LISTEN is down.
+const RECHECK_MS = 60_000;
+// While LISTEN is down, each topic with open streams is polled this often.
+const POLL_MS = 5_000;
+// Reasons that the client is told about, with event: end.
+const END_EVENT_REASONS: ReadonlySet<string> = new Set([
+  "revoked",
+  "token_expired",
+  "server_closing",
+]);
 const MAX_PER_SESSION = 3;
 const MAX_PER_PROCESS = 2000;
 const SEQ = /^[0-9]{1,15}$/;
@@ -47,6 +59,10 @@ interface Stream {
   // Recorded at access time. A live row is loaded in this workspace's context
   // and never in one that a notification names.
   workspaceId: string;
+  accountId: string;
+  sessionId: string;
+  // When the access token that opened the stream expires.
+  expiresAt: Date;
   res: ServerResponse;
   lastSent: number;
   // Live rows that arrive while the stream opens. Null once the stream is live.
@@ -54,6 +70,12 @@ interface Stream {
   started: boolean;
   closed: boolean;
   timer: ReturnType<typeof setInterval> | null;
+  recheckTimer: ReturnType<typeof setInterval> | null;
+  expiryTimer: ReturnType<typeof setTimeout> | null;
+  // An access re-check is waiting in the queue.
+  queued: boolean;
+  // A hint named this stream before it went live: re-check as soon as it does.
+  hinted: boolean;
   end(reason: string): void;
 }
 
@@ -65,6 +87,13 @@ type Slot =
 export interface StreamHub {
   // The raw payload of a pingzo_msg notification: a hint only.
   notify(payload: string): void;
+  // The raw payload of a pingzo_acl notification: a hint only. It selects the
+  // streams to re-check and closes none by itself.
+  aclNotify(payload: string): void;
+  // The LISTEN connection went down: poll the topics with open streams.
+  listenDown(): void;
+  // The LISTEN connection is back: stop polling, catch each topic up once.
+  listenUp(): void;
   // Ends every open stream and refuses nothing new from then on.
   endAll(reason: string): void;
 }
@@ -92,6 +121,11 @@ function messageFrame(row: MessageRow): string {
 // No id: line, so a gap never moves the client's Last-Event-ID.
 function gapFrame(gap: Gap): string {
   return `event: gap\ndata: ${JSON.stringify({ from: gap.from, to: gap.to })}\n\n`;
+}
+
+// The last frame of a stream that the server ends. No id: line either.
+function endFrame(reason: string): string {
+  return `event: end\ndata: ${JSON.stringify({ reason })}\n\n`;
 }
 
 function write(stream: Stream, text: string): void {
@@ -174,6 +208,15 @@ export function registerStreamRoutes(
   const chains = new Map<string, Promise<void>>();
   const keepaliveMs = ctx.streamKeepaliveMs ?? KEEPALIVE_MS;
   const processCap = ctx.streamProcessCap ?? MAX_PER_PROCESS;
+  const recheckMs = ctx.streamRecheckMs ?? RECHECK_MS;
+  const pollMs = ctx.streamPollMs ?? POLL_MS;
+  // Access re-checks run one after another, so a revocation that touches
+  // thousands of streams uses one pooled connection at a time.
+  let recheckChain: Promise<void> = Promise.resolve();
+  // Topics with a catch-up waiting in their chain.
+  const catchingUp = new Set<string>();
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let listenIsDown = false;
   let total = 0;
   let closing = false;
 
@@ -217,6 +260,17 @@ export function registerStreamRoutes(
     if (row === undefined) return;
     const current = byTopic.get(topicId);
     if (current === undefined) return;
+    // A live stream that is missing a seq before this one (a notification was
+    // lost around a LISTEN outage) is brought up to date by reading from its
+    // own last seq, so that sending this one alone cannot skip the rest.
+    const behind = [...current].some(
+      (stream) =>
+        !stream.closed && stream.buffer === null && stream.lastSent + 1 < seq,
+    );
+    if (behind) {
+      await catchUp(topicId);
+      return;
+    }
     for (const stream of [...current]) {
       if (stream.closed) continue;
       if (stream.buffer !== null) stream.buffer.push(row);
@@ -241,9 +295,15 @@ export function registerStreamRoutes(
     // No stream on this topic: nothing to do.
     if ((byTopic.get(topicId)?.size ?? 0) === 0) return;
     const seq = Number(seqText);
+    enqueue(topicId, () => deliver(topicId, seq));
+  }
+
+  // Everything that reads rows for a topic's streams (a live row, a poll, a
+  // catch-up) runs in that topic's chain, one job after another.
+  function enqueue(topicId: string, job: () => Promise<void>): void {
     const previous = chains.get(topicId) ?? Promise.resolve();
     const next: Promise<void> = previous
-      .then(() => deliver(topicId, seq))
+      .then(job)
       .catch(() => {
         ctx.logger.log({ event: "stream_notify", reason: "load_failed" });
       })
@@ -253,8 +313,204 @@ export function registerStreamRoutes(
     chains.set(topicId, next);
   }
 
+  // Reads what the topic's live streams have not got yet, at most 500 rows per
+  // query, in the workspace recorded on the streams, and drains until a query
+  // comes back short. Each row goes through the same drop-any-seq-already-sent
+  // rule. A stream behind oldest_kept_seq gets the B3 gap event first.
+  async function catchUp(topicId: string): Promise<void> {
+    let previousLowest = -1;
+    for (;;) {
+      const open = byTopic.get(topicId);
+      if (open === undefined) return;
+      const live = [...open].filter(
+        (stream) => !stream.closed && stream.buffer === null,
+      );
+      const lead = first(live);
+      if (lead === undefined) return;
+      const workspaceId = lead.workspaceId;
+      const lowest = Math.min(...live.map((stream) => stream.lastSent));
+      // No progress since the last query: stop rather than loop.
+      if (lowest <= previousLowest) return;
+      previousLowest = lowest;
+      const got = await withWorkspaceTx(ctx.pool, workspaceId, async (tx) => {
+        const topic = await tx.query<{ oldest_kept_seq: string }>(
+          `SELECT oldest_kept_seq FROM topics
+            WHERE id = $1 AND workspace_id = $2`,
+          [topicId, workspaceId],
+        );
+        const row = first(topic.rows);
+        if (row === undefined) return null;
+        const oldest = Number(row.oldest_kept_seq);
+        const found = await tx.query<MessageRow>(
+          `SELECT ${MESSAGE_COLUMNS} FROM messages
+            WHERE topic_id = $1 AND workspace_id = $2 AND seq > $3
+            ORDER BY seq LIMIT $4`,
+          [topicId, workspaceId, Math.max(lowest, oldest - 1), REPLAY_MAX],
+        );
+        return { oldest, rows: found.rows };
+      });
+      if (got === null) return;
+      const current = byTopic.get(topicId);
+      if (current === undefined) return;
+      for (const stream of [...current]) {
+        if (stream.closed) continue;
+        if (stream.buffer !== null) {
+          stream.buffer.push(...got.rows);
+          continue;
+        }
+        if (stream.lastSent < got.oldest - 1) {
+          write(
+            stream,
+            gapFrame({ from: stream.lastSent + 1, to: got.oldest - 1 }),
+          );
+          stream.lastSent = got.oldest - 1;
+        }
+        for (const row of got.rows) sendMessage(stream, row);
+      }
+      if (got.rows.length < REPLAY_MAX) return;
+    }
+  }
+
+  function scheduleCatchUp(topicId: string): void {
+    if (catchingUp.has(topicId)) return;
+    catchingUp.add(topicId);
+    enqueue(topicId, async () => {
+      catchingUp.delete(topicId);
+      await catchUp(topicId);
+    });
+  }
+
+  function pollAll(): void {
+    for (const topicId of [...byTopic.keys()]) scheduleCatchUp(topicId);
+  }
+
+  function stopPolling(): void {
+    if (pollTimer !== null) clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  function listenDown(): void {
+    if (closing || listenIsDown) return;
+    listenIsDown = true;
+    // At once, for what was published before the loss was noticed, then every
+    // poll interval until LISTEN is back.
+    pollAll();
+    pollTimer = setInterval(pollAll, pollMs);
+  }
+
+  function listenUp(): void {
+    if (closing) return;
+    listenIsDown = false;
+    stopPolling();
+    // What was published while LISTEN was down: once per topic, in its chain.
+    pollAll();
+  }
+
+  // The access check of a stream that is already open, in one short
+  // transaction. Everything must still hold: the session (as requireSession
+  // checks it), the membership with workspace.read, the topic, and an active
+  // workspace. Anything missing is a no.
+  async function stillAllowed(stream: Stream): Promise<boolean> {
+    return withPathContext(
+      ctx.pool,
+      { accountId: stream.accountId },
+      stream.workspaceId,
+      async (tx) => {
+        const session = await tx.query(
+          `SELECT s.id
+             FROM sessions s JOIN accounts a ON a.id = s.account_id
+            WHERE s.id = $1 AND s.account_id = $2
+              AND s.revoked_at IS NULL AND s.expires_at > $3
+              AND a.status = 'active'`,
+          [stream.sessionId, stream.accountId, ctx.clock.now()],
+        );
+        if (first(session.rows) === undefined) return false;
+        const role = await memberRole(tx, stream.workspaceId, stream.accountId);
+        if (role === null || !can(role, "workspace.read")) return false;
+        const topic = await tx.query(
+          "SELECT id FROM topics WHERE id = $1 AND workspace_id = $2",
+          [stream.topicId, stream.workspaceId],
+        );
+        if (first(topic.rows) === undefined) return false;
+        const workspace = await tx.query<{ status: string }>(
+          "SELECT status FROM workspaces WHERE id = $1",
+          [stream.workspaceId],
+        );
+        return first(workspace.rows)?.status === "active";
+      },
+    );
+  }
+
+  // Ends the stream if its access token has run out, by the app's clock.
+  function expireIfDue(stream: Stream): boolean {
+    if (stream.closed) return true;
+    if (ctx.clock.now().getTime() < stream.expiresAt.getTime()) return false;
+    stream.end("token_expired");
+    return true;
+  }
+
+  function armExpiry(stream: Stream): void {
+    const left = stream.expiresAt.getTime() - ctx.clock.now().getTime();
+    const wait = Math.max(left, 1000);
+    stream.expiryTimer = setTimeout(() => {
+      if (!expireIfDue(stream)) armExpiry(stream);
+    }, wait);
+  }
+
+  // Queues an access re-check. The stream closes only if the check says no. A
+  // database error is not a no: the stream stays and the next re-check (a hint
+  // or the interval) tries again.
+  function queueRecheck(stream: Stream): void {
+    if (stream.closed) return;
+    if (!stream.started) {
+      stream.hinted = true;
+      return;
+    }
+    if (stream.queued) return;
+    stream.queued = true;
+    recheckChain = recheckChain.then(async () => {
+      stream.queued = false;
+      if (stream.closed || expireIfDue(stream)) return;
+      try {
+        if (!(await stillAllowed(stream))) stream.end("revoked");
+      } catch {
+        ctx.logger.log({ event: "stream_recheck", reason: "recheck_failed" });
+      }
+    });
+  }
+
+  function aclNotify(payload: string): void {
+    if (closing) return;
+    const parts = payload.split(":");
+    const kind = parts[0];
+    const a = parts[1];
+    const b = parts[2];
+    let match: ((stream: Stream) => boolean) | null = null;
+    if (kind === "member" && parts.length === 3 && isUuid(a) && isUuid(b)) {
+      match = (stream) => stream.workspaceId === a && stream.accountId === b;
+    } else if (kind === "session" && parts.length === 2 && isUuid(a)) {
+      match = (stream) => stream.sessionId === a;
+    } else if (kind === "account" && parts.length === 2 && isUuid(a)) {
+      match = (stream) => stream.accountId === a;
+    } else if (kind === "topic" && parts.length === 2 && isUuid(a)) {
+      match = (stream) => stream.topicId === a;
+    } else if (kind === "workspace" && parts.length === 2 && isUuid(a)) {
+      match = (stream) => stream.workspaceId === a;
+    }
+    if (match === null) {
+      ctx.logger.log({ event: "stream_acl", reason: "bad_notify" });
+      return;
+    }
+    for (const set of [...byTopic.values()]) {
+      for (const stream of [...set]) {
+        if (match(stream)) queueRecheck(stream);
+      }
+    }
+  }
+
   function endAll(reason: string): void {
     closing = true;
+    stopPolling();
     for (const set of [...byTopic.values()]) {
       for (const stream of [...set]) stream.end(reason);
     }
@@ -338,16 +594,25 @@ export function registerStreamRoutes(
       const made: Stream = {
         topicId,
         workspaceId: access.workspaceId,
+        accountId: session.accountId,
+        sessionId: session.sessionId,
+        expiresAt: session.expiresAt,
         res,
         lastSent: 0,
         buffer: [],
         started: false,
         closed: false,
         timer: null,
+        recheckTimer: null,
+        expiryTimer: null,
+        queued: false,
+        hinted: false,
         end(reason) {
           if (made.closed) return;
           made.closed = true;
           if (made.timer !== null) clearInterval(made.timer);
+          if (made.recheckTimer !== null) clearInterval(made.recheckTimer);
+          if (made.expiryTimer !== null) clearTimeout(made.expiryTimer);
           const set = byTopic.get(topicId);
           if (set !== undefined) {
             set.delete(made);
@@ -356,6 +621,14 @@ export function registerStreamRoutes(
           slot.release();
           // Before the headers went out, the route's own reply speaks.
           if (!made.started) return;
+          // The client is told why, when the server is the one that ends it.
+          if (
+            END_EVENT_REASONS.has(reason) &&
+            !res.destroyed &&
+            !res.writableEnded
+          ) {
+            res.write(endFrame(reason));
+          }
           if (!res.writableEnded) res.end();
           ctx.logger.log({
             event: "stream_end",
@@ -423,6 +696,13 @@ export function registerStreamRoutes(
         () => write(made, ": keepalive\n\n"),
         keepaliveMs,
       );
+      // Access holds only while it is re-checked: every interval, and at once
+      // if a hint named this stream while it was opening.
+      made.recheckTimer = setInterval(() => {
+        if (!expireIfDue(made)) queueRecheck(made);
+      }, recheckMs);
+      armExpiry(made);
+      if (made.hinted) queueRecheck(made);
       return reply;
     } catch (error) {
       if (stream !== null) stream.end("error");
@@ -432,5 +712,5 @@ export function registerStreamRoutes(
     }
   });
 
-  return { notify, endAll };
+  return { notify, aclNotify, listenDown, listenUp, endAll };
 }
