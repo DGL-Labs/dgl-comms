@@ -240,6 +240,98 @@ describe("T-ROLE", () => {
     });
   });
 
+  it("has no access to service_alerts or its sequence", async () => {
+    const res = await pool.query<{ ok: boolean }>(
+      `SELECT NOT has_any_column_privilege(current_user, 'service_alerts', 'SELECT,INSERT,UPDATE,REFERENCES')
+              AND NOT has_table_privilege(current_user, 'service_alerts', 'DELETE')
+              AND NOT has_sequence_privilege(current_user, 'service_alerts_id_seq', 'USAGE,SELECT,UPDATE')
+              AS ok`,
+    );
+    expect(res.rows[0]?.ok).toBe(true);
+  });
+
+  // The disk guard's role (migration 0007). Test bootstrap only: production
+  // provisioning is at C-1k.
+  describe("pingzo_maintainer", () => {
+    it("can log in, is not a superuser and does not bypass RLS", async () => {
+      const res = await pool.query<{
+        rolcanlogin: boolean;
+        rolbypassrls: boolean;
+        rolsuper: boolean;
+      }>(
+        `SELECT rolcanlogin, rolbypassrls, rolsuper
+           FROM pg_roles WHERE rolname = 'pingzo_maintainer'`,
+      );
+      expect(res.rows).toHaveLength(1);
+      expect(res.rows[0]?.rolcanlogin).toBe(true);
+      expect(res.rows[0]?.rolbypassrls).toBe(false);
+      expect(res.rows[0]?.rolsuper).toBe(false);
+    });
+
+    it("has no privilege of any kind on any tenant table", async () => {
+      const res = await pool.query<{ t: string; ok: boolean }>(
+        `SELECT c.relname AS t,
+                (has_table_privilege('pingzo_maintainer', c.oid,
+                   'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                 OR has_any_column_privilege('pingzo_maintainer', c.oid,
+                   'SELECT,INSERT,UPDATE,REFERENCES')) AS ok
+           FROM pg_class c
+          WHERE c.relnamespace = 'public'::regnamespace
+            AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+            AND c.relname NOT IN ('service_limits', 'service_alerts', 'audit_log')`,
+      );
+      expect(res.rows.length).toBeGreaterThan(10);
+      for (const row of res.rows) {
+        expect(row.ok, `${row.t}`).toBe(false);
+      }
+    });
+
+    it("has only the grants of the disk guard", async () => {
+      const res = await pool.query<{ ok: boolean }>(
+        `SELECT has_table_privilege('pingzo_maintainer', 'service_limits', 'SELECT')
+                AND has_column_privilege('pingzo_maintainer', 'service_limits', 'signup_paused', 'UPDATE')
+                AND has_column_privilege('pingzo_maintainer', 'service_limits', 'publish_paused_non_internal', 'UPDATE')
+                AND NOT has_column_privilege('pingzo_maintainer', 'service_limits', 'max_workspaces_total', 'UPDATE')
+                AND NOT has_column_privilege('pingzo_maintainer', 'service_limits', 'max_msgs_per_day_total', 'UPDATE')
+                AND NOT has_table_privilege('pingzo_maintainer', 'service_limits', 'INSERT')
+                AND NOT has_table_privilege('pingzo_maintainer', 'service_limits', 'DELETE')
+                AND has_table_privilege('pingzo_maintainer', 'service_alerts', 'INSERT')
+                AND NOT has_table_privilege('pingzo_maintainer', 'service_alerts', 'SELECT')
+                AND NOT has_table_privilege('pingzo_maintainer', 'service_alerts', 'UPDATE')
+                AND NOT has_table_privilege('pingzo_maintainer', 'service_alerts', 'DELETE')
+                AND has_table_privilege('pingzo_maintainer', 'audit_log', 'INSERT')
+                AND NOT has_table_privilege('pingzo_maintainer', 'audit_log', 'SELECT')
+                AND NOT has_table_privilege('pingzo_maintainer', 'audit_log', 'UPDATE')
+                AND NOT has_table_privilege('pingzo_maintainer', 'audit_log', 'DELETE')
+                AND has_sequence_privilege('pingzo_maintainer', 'service_alerts_id_seq', 'USAGE')
+                AND has_sequence_privilege('pingzo_maintainer', 'audit_log_id_seq', 'USAGE')
+                AND NOT has_sequence_privilege('pingzo_maintainer', 'fanout_jobs_id_seq', 'USAGE')
+                AND NOT has_schema_privilege('pingzo_maintainer', 'public', 'CREATE')
+                AS ok`,
+      );
+      expect(res.rows[0]?.ok).toBe(true);
+    });
+
+    it("owns nothing and is a member of no other role", async () => {
+      const owned = await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n
+           FROM pg_shdepend d JOIN pg_roles r ON r.oid = d.refobjid
+          WHERE r.rolname = 'pingzo_maintainer' AND d.deptype = 'o'
+            AND d.dbid = (SELECT oid FROM pg_database
+                           WHERE datname = current_database())`,
+      );
+      expect(owned.rows[0]?.n).toBe(0);
+      const memberOf = await pool.query<{ role: string }>(
+        `SELECT r.rolname AS role
+           FROM pg_auth_members am
+           JOIN pg_roles r ON r.oid = am.roleid
+           JOIN pg_roles m ON m.oid = am.member
+          WHERE m.rolname = 'pingzo_maintainer'`,
+      );
+      expect(memberOf.rows).toEqual([]);
+    });
+  });
+
   it("cannot create tables", async () => {
     await expect(
       pool.query("CREATE TABLE t_role_probe (a int)"),
