@@ -109,15 +109,12 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: Ctx): void {
       return reply.code(409).send({ error: "key_limit" });
     }
     request.reason = "key_created";
-    return reply
-      .header("cache-control", "no-store")
-      .code(201)
-      .send({
-        id: outcome.made.id,
-        topic_id: topicId,
-        key: outcome.made.key,
-        expires_at: outcome.made.expiresAt,
-      });
+    return reply.header("cache-control", "no-store").code(201).send({
+      id: outcome.made.id,
+      topic_id: topicId,
+      key: outcome.made.key,
+      expires_at: outcome.made.expiresAt,
+    });
   });
 
   // GET /v1/workspaces/:id/keys: ids and states, never a hash.
@@ -222,16 +219,13 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: Ctx): void {
       return reply.code(409).send({ error: "key_not_rotatable" });
     }
     request.reason = "key_rotated";
-    return reply
-      .header("cache-control", "no-store")
-      .code(201)
-      .send({
-        id: outcome.made.id,
-        topic_id: outcome.topicId,
-        key: outcome.made.key,
-        expires_at: outcome.made.expiresAt,
-        rotated_id: keyId,
-      });
+    return reply.header("cache-control", "no-store").code(201).send({
+      id: outcome.made.id,
+      topic_id: outcome.topicId,
+      key: outcome.made.key,
+      expires_at: outcome.made.expiresAt,
+      rotated_id: keyId,
+    });
   });
 
   // DELETE /v1/keys/:keyId: revoked at once. A repeat keeps the first time.

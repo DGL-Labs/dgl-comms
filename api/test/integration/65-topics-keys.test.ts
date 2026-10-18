@@ -170,12 +170,7 @@ describe("topics and keys", () => {
         { name: "No" },
       );
       expect(create.statusCode).toBe(404);
-      const list = await api(
-        t,
-        outsider,
-        "GET",
-        `/v1/workspaces/${ws}/topics`,
-      );
+      const list = await api(t, outsider, "GET", `/v1/workspaces/${ws}/topics`);
       expect(list.statusCode).toBe(404);
     });
 
