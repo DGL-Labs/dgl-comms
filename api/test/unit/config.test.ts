@@ -42,6 +42,16 @@ describe("loadConfig", () => {
     ).toBe("/run/disk.json");
   });
 
+  it("uses the database URL for LISTEN unless PINGZO_LISTEN_URL is set", () => {
+    expect(loadConfig(BASE).listenUrl).toBe("postgres://unused");
+    expect(loadConfig({ ...BASE, PINGZO_LISTEN_URL: "" }).listenUrl).toBe(
+      "postgres://unused",
+    );
+    expect(
+      loadConfig({ ...BASE, PINGZO_LISTEN_URL: "postgres://direct" }).listenUrl,
+    ).toBe("postgres://direct");
+  });
+
   it("does not put the JWT key in an error message", () => {
     const env = { ...BASE, PINGZO_JWT_KEY: "short-secret-value" };
     expect(() => loadConfig(env)).toThrow(/PINGZO_JWT_KEY/);

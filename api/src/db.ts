@@ -174,6 +174,60 @@ export function withKeyContext<T>(
   });
 }
 
+// A short transaction whose context is exactly one workspace. For work that
+// has no caller of its own, such as loading a message for a stream: the
+// workspace comes from state the server recorded, never from a notification.
+export function withWorkspaceTx<T>(
+  pool: Pool,
+  workspaceId: string,
+  fn: (tx: Db) => Promise<T>,
+): Promise<T> {
+  return withTx(pool, async (tx) => {
+    await setWorkspaceIds(tx, [workspaceId]);
+    return fn(tx);
+  });
+}
+
+export interface Listener {
+  close(): Promise<void>;
+}
+
+// The one LISTEN client of a process: a direct connection that is not part of
+// the pool, on pingzo_msg. onNotify gets the raw payload, which is a hint and
+// nothing more. onDown runs when the connection fails (it may run twice for
+// one failure); this client does not reconnect.
+export async function startListener(
+  connectionString: string,
+  onNotify: (payload: string) => void,
+  onDown: () => void,
+): Promise<Listener> {
+  const client = new pg.Client({ connectionString });
+  let closing = false;
+  client.on("notification", (message) => {
+    if (message.channel === "pingzo_msg") onNotify(message.payload ?? "");
+  });
+  client.on("error", () => {
+    if (!closing) onDown();
+  });
+  client.on("end", () => {
+    if (!closing) onDown();
+  });
+  try {
+    await client.connect();
+    await client.query("LISTEN pingzo_msg");
+  } catch (error) {
+    closing = true;
+    await client.end().catch(() => undefined);
+    throw error;
+  }
+  return {
+    async close() {
+      closing = true;
+      await client.end().catch(() => undefined);
+    },
+  };
+}
+
 // One statement in a transaction of its own, for the counters (rate_buckets and
 // the usage tables hold numbers, not tenant rows, and have no row-level
 // security). It commits at once, so a debit stays even if the request fails
