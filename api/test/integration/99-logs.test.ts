@@ -25,6 +25,12 @@ const ALLOWED_FIELDS = [
   "status",
 ];
 
+interface LogEntry {
+  route: string | null;
+  status: number | null;
+  reason: string | null;
+}
+
 // T-LOGS: runs last (file name order). The harness sends every app log line to
 // one file for the whole suite and records every test email, token, JWT and
 // header value as a secret. None may appear in the log.
@@ -82,6 +88,50 @@ describe("T-LOGS", () => {
       "DELETE",
       `/v1/workspaces/${workspaceId}/members/${guest.accountId}`,
     );
+    // Publish and key errors: a topic, a key, and requests that fail in each
+    // way. The key, its secret, a wrong secret and the message body must stay
+    // out of the log.
+    const topic = await api(
+      t,
+      host,
+      "POST",
+      `/v1/workspaces/${workspaceId}/topics`,
+      { name: "Probe" },
+    );
+    const topicId = topic.json<{ id: string }>().id;
+    const made = await api(t, host, "POST", `/v1/topics/${topicId}/keys`);
+    const { id: keyId, key } = made.json<{ id: string; key: string }>();
+    registerSecret(key);
+    registerSecret(key.slice(key.indexOf(".") + 1));
+    registerSecret(keyId);
+    const wrongKey = `${keyId}.${randomBytes(32).toString("base64url")}`;
+    registerSecret(wrongKey);
+    registerSecret(wrongKey.slice(wrongKey.indexOf(".") + 1));
+    const probeBody = `body-${randomBytes(12).toString("hex")}`;
+    registerSecret(probeBody);
+    const publishUrl = `/v1/topics/${topicId}/messages`;
+    const byKey = (credential: string) =>
+      t.app.inject({
+        method: "POST",
+        url: publishUrl,
+        remoteAddress: "203.0.113.77",
+        headers: { authorization: `Bearer ${credential}` },
+        payload: { body: probeBody },
+      });
+    await byKey(key);
+    await byKey(wrongKey);
+    await t.app.inject({
+      method: "POST",
+      url: `${publishUrl}?key=${encodeURIComponent(key)}`,
+      headers: bearer(host.accessToken),
+      payload: { body: probeBody },
+    });
+    await api(t, host, "POST", publishUrl, {
+      body: `${probeBody}${"x".repeat(2100)}`,
+    });
+    await api(t, host, "DELETE", `/v1/keys/${keyId}`);
+    await byKey(key);
+    await api(t, host, "POST", `/v1/keys/${keyId}/rotate`);
     await t.app.inject({ method: "GET", url: "/healthz", headers: extra });
     await t.app.inject({
       method: "POST",
@@ -101,6 +151,21 @@ describe("T-LOGS", () => {
       const entry = JSON.parse(line) as Record<string, unknown>;
       expect(Object.keys(entry).sort()).toEqual(ALLOWED_FIELDS);
     }
+  });
+
+  it("logs publish and key errors by route, status and reason only", () => {
+    const entries = readFileSync(inject("logFile"), "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as LogEntry);
+    const statuses = (route: string) =>
+      new Set(entries.filter((e) => e.route === route).map((e) => e.status));
+    const published = statuses("/v1/topics/:id/messages");
+    for (const status of [201, 400, 401, 413]) {
+      expect(published.has(status), `publish ${status}`).toBe(true);
+    }
+    expect(statuses("/v1/keys/:keyId/rotate").has(409)).toBe(true);
+    expect(entries.some((e) => e.reason === "key_in_query")).toBe(true);
   });
 
   it("never contains a test email, token, JWT or header value", () => {

@@ -31,6 +31,17 @@ describe("loadConfig", () => {
     expect(() => loadConfig(noUrl)).toThrow();
   });
 
+  it("makes the disk status path optional", () => {
+    expect(loadConfig(BASE).diskStatusPath).toBeNull();
+    expect(
+      loadConfig({ ...BASE, PINGZO_DISK_STATUS_PATH: "" }).diskStatusPath,
+    ).toBeNull();
+    expect(
+      loadConfig({ ...BASE, PINGZO_DISK_STATUS_PATH: "/run/disk.json" })
+        .diskStatusPath,
+    ).toBe("/run/disk.json");
+  });
+
   it("does not put the JWT key in an error message", () => {
     const env = { ...BASE, PINGZO_JWT_KEY: "short-secret-value" };
     expect(() => loadConfig(env)).toThrow(/PINGZO_JWT_KEY/);

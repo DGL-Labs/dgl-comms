@@ -11,6 +11,7 @@ import {
   redeem,
   signupAndVerify,
   uniqueEmail,
+  withAllWorkspaces,
 } from "./harness.ts";
 import type { TestApp, Tokens } from "./harness.ts";
 
@@ -25,9 +26,11 @@ describe("T-DELETE-CASCADE", () => {
 
   // Rows in `table` that belong to the account (or all rows if no id).
   async function rows(table: string, column: string, id: string) {
-    const res = await t.pool.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM ${table} WHERE ${column} = $1`,
-      [id],
+    const res = await withAllWorkspaces(t.pool, (c) =>
+      c.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ${table} WHERE ${column} = $1`,
+        [id],
+      ),
     );
     return res.rows[0]?.n;
   }
@@ -287,9 +290,11 @@ describe("T-DELETE-CASCADE", () => {
       const ws = await createWorkspace(t, owner);
       await addMember(t, owner, ws, other, "admin");
       expect((await del(owner, true)).statusCode).toBe(409);
-      const row = await t.pool.query<{ owner_id: string }>(
-        "SELECT owner_id FROM workspaces WHERE id = $1",
-        [ws],
+      const row = await withAllWorkspaces(t.pool, (c) =>
+        c.query<{ owner_id: string }>(
+          "SELECT owner_id FROM workspaces WHERE id = $1",
+          [ws],
+        ),
       );
       expect(row.rows[0]?.owner_id).toBe(owner.accountId);
     });

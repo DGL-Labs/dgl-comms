@@ -9,8 +9,29 @@ export interface Db {
   ): Promise<QueryResult<R>>;
 }
 
+// The api's share of the connection budget (docs/DB-ROLES.md): 8 connections,
+// a 2 second wait for one, and timeouts on every connection. A lock wait over
+// lock_timeout raises SQLSTATE 55P03; a wait for a connection over
+// connectionTimeoutMillis rejects with POOL_TIMEOUT_MESSAGE. Both end as 503
+// busy (isBusyError, and the error handler in app.ts).
 export function createPool(connectionString: string): Pool {
-  return new pg.Pool({ connectionString, max: 10 });
+  return new pg.Pool({
+    connectionString,
+    max: 8,
+    connectionTimeoutMillis: 2000,
+    options:
+      "-c statement_timeout=5000 -c lock_timeout=3000 -c idle_in_transaction_session_timeout=10000",
+  });
+}
+
+// What pg rejects with when no connection came free in time.
+const POOL_TIMEOUT_MESSAGE = "timeout exceeded when trying to connect";
+
+// A lock wait that timed out, or a pool that had no free connection in time:
+// both are retryable.
+export function isBusyError(error: unknown): boolean {
+  if (pgCode(error) === "55P03") return true;
+  return error instanceof Error && error.message === POOL_TIMEOUT_MESSAGE;
 }
 
 export async function withTx<T>(
@@ -42,6 +63,9 @@ export interface Scope {
   // to them some other way: a workspace this transaction just made, one that
   // a valid invitation names, or one the caller owns.
   addWorkspaces(workspaceIds: string[]): Promise<void>;
+  // Cuts the context down to one workspace: that workspace if it is already in
+  // the context, otherwise the empty list. It never adds a workspace.
+  narrowTo(workspaceId: string): Promise<void>;
 }
 
 export interface RequestContext {
@@ -88,6 +112,11 @@ export async function loadContext(
       }
       await setWorkspaceIds(tx, ids);
     },
+    async narrowTo(workspaceId) {
+      const keep = ids.includes(workspaceId) ? [workspaceId] : [];
+      ids.splice(0, ids.length, ...keep);
+      await setWorkspaceIds(tx, ids);
+    },
   };
 }
 
@@ -99,6 +128,22 @@ export function withContext<T>(
 ): Promise<T> {
   return withTx(pool, async (tx) => {
     const scope = await loadContext(tx, who.accountId, who.inviteHash);
+    return fn(tx, scope);
+  });
+}
+
+// For a route on /v1/workspaces/:id/...: the context is the path workspace
+// intersected with the caller's memberships. A member sees that one workspace;
+// a non-member sees none. It never adds a workspace, so a skipped or broken
+// permission check still reaches nothing of another workspace.
+export function withPathContext<T>(
+  pool: Pool,
+  who: RequestContext,
+  workspaceId: string,
+  fn: (tx: Db, scope: Scope) => Promise<T>,
+): Promise<T> {
+  return withContext(pool, who, async (tx, scope) => {
+    await scope.narrowTo(workspaceId);
     return fn(tx, scope);
   });
 }
@@ -127,6 +172,47 @@ export function withKeyContext<T>(
     await setWorkspaceIds(tx, [row.workspace_id]);
     return fn(tx, { topicId: row.topic_id, workspaceId: row.workspace_id });
   });
+}
+
+// One statement in a transaction of its own, for the counters (rate_buckets and
+// the usage tables hold numbers, not tenant rows, and have no row-level
+// security). It commits at once, so a debit stays even if the request fails
+// later.
+export function autocommit<R extends QueryResultRow = QueryResultRow>(
+  pool: Pool,
+  text: string,
+  values?: unknown[],
+): Promise<QueryResult<R>> {
+  return pool.query<R>(text, values);
+}
+
+// Test hook (AppDeps.testHooks.lockTimeoutMs): for this transaction only, lock
+// waits last this long. statement_timeout follows, so that a wait this long is
+// not cut short by it.
+export async function setLockTimeout(tx: Db, ms: number): Promise<void> {
+  const wait = Math.max(0, Math.floor(ms));
+  await tx.query("SELECT set_config('lock_timeout', $1, true)", [`${wait}ms`]);
+  await tx.query("SELECT set_config('statement_timeout', $1, true)", [
+    `${wait + 5000}ms`,
+  ]);
+}
+
+// Test hook (AppDeps.testHooks.holdAfterSeqMs): holds the transaction open for
+// ms, with the statement and idle-in-transaction timeouts off on this
+// transaction's connection only.
+export async function holdTx(tx: Db, ms: number): Promise<void> {
+  await tx.query("SELECT set_config('statement_timeout', '0', true)");
+  await tx.query(
+    "SELECT set_config('idle_in_transaction_session_timeout', '0', true)",
+  );
+  await tx.query("SELECT pg_sleep($1::float8)", [ms / 1000]);
+}
+
+// The SQLSTATE of a database error, if it has one.
+export function pgCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
 }
 
 export function first<R>(rows: R[]): R | undefined {

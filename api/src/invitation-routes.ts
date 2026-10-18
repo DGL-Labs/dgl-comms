@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { writeAudit } from "./audit.ts";
 import type { Ctx } from "./context.ts";
-import { first, withContext } from "./db.ts";
+import { first, withContext, withPathContext } from "./db.ts";
 import { requireSession } from "./guard.ts";
 import { isRecord, isUuid, normalizeEmail } from "./input.ts";
 import { hashToken, newToken } from "./tokens.ts";
@@ -47,9 +47,10 @@ export function registerInvitationRoutes(app: FastifyInstance, ctx: Ctx): void {
     const since = new Date(now.getTime() - DAY_MS);
     const token = newToken();
 
-    const outcome = await withContext(
+    const outcome = await withPathContext(
       ctx.pool,
       { accountId: me },
+      id,
       async (tx) => {
         const decision = await authorize(ctx, tx, me, id, "invite.create");
         if (decision.kind !== "ok") return decision;
@@ -186,9 +187,10 @@ export function registerInvitationRoutes(app: FastifyInstance, ctx: Ctx): void {
       if (id === null || inviteId === null) return notFound(request, reply);
       const now = ctx.clock.now();
 
-      const outcome = await withContext(
+      const outcome = await withPathContext(
         ctx.pool,
         { accountId: session.accountId },
+        id,
         async (tx) => {
           const decision = await authorize(
             ctx,

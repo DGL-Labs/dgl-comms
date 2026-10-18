@@ -6,6 +6,7 @@ import { loadBlocklist } from "./blocklist.ts";
 import type { Config } from "./config.ts";
 import { systemClock } from "./context.ts";
 import type { Clock, Ctx } from "./context.ts";
+import { isBusyError } from "./db.ts";
 import type { EmailSender } from "./email.ts";
 import { createLogger } from "./log.ts";
 import type { LogSink } from "./log.ts";
@@ -23,7 +24,11 @@ export interface AppDeps {
   onSessionRevoked?: (sessionIds: string[]) => void;
   logSink?: LogSink;
   // Tests only. Never read from config or the environment.
-  testHooks?: { skipPermissionChecks?: boolean };
+  testHooks?: {
+    skipPermissionChecks?: boolean;
+    holdAfterSeqMs?: number;
+    lockTimeoutMs?: number;
+  };
 }
 
 export function buildApp(deps: AppDeps): FastifyInstance {
@@ -41,6 +46,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     },
     logger,
     skipPermissionChecks: deps.testHooks?.skipPermissionChecks === true,
+    holdAfterSeqMs: deps.testHooks?.holdAfterSeqMs ?? null,
+    lockTimeoutMs: deps.testHooks?.lockTimeoutMs ?? null,
     sessionsRevoked(sessionIds) {
       if (sessionIds.length === 0) return;
       try {
@@ -55,7 +62,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({
     logger: false,
     genReqId: () => randomUUID(),
-    bodyLimit: 4096,
+    // Above the worst JSON escaping of a 2,048-byte body and a 120-character
+    // title (G5 S1). parseMessage keeps the real 2,048-byte body limit.
+    bodyLimit: 16384,
   });
   app.decorateRequest("accountId", null);
   app.decorateRequest("reason", null);
@@ -73,8 +82,14 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     done();
   });
 
-  // Error bodies and logs never carry the error message.
+  // Error bodies and logs never carry the error message. A lock wait that timed
+  // out (SQLSTATE 55P03) or a pool with no free connection is a retryable 503
+  // busy, on every route.
   app.setErrorHandler((error: FastifyError, request, reply) => {
+    if (isBusyError(error)) {
+      request.reason = "busy";
+      return reply.header("retry-after", "1").code(503).send({ error: "busy" });
+    }
     const client =
       error.statusCode !== undefined &&
       error.statusCode >= 400 &&

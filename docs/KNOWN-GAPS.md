@@ -37,10 +37,6 @@ Sign-up answers 403 for an address that is not on the team allowlist and 202 for
 
 Accepted for C-1c (G5 round 1). Each has a later step that closes it.
 
-### Context is wider than the path (NOTE 7)
-
-The request context holds every workspace the caller belongs to, not just the one in the path. A route that forgot its permission check would see all of the caller's own workspaces. It is narrowed to the path workspace at C-1d.
-
 ### `withTx` is still allowed (NOTE 8)
 
 `withTx` (no context) remains available. It is safe only for tables with RLS. Writes to `workspaces` and `audit_log` must go through `withContext`.
@@ -59,15 +55,7 @@ Invite emails are not checked against the domain blocklist, and actions on suspe
 
 ### Role bootstrap membership
 
-In PostgreSQL 16, `pingzo_owner` cannot revoke its own membership of `pingzo_keyresolver`, because the superuser made the grant. The superuser step in the role bootstrap does it after the migrations (see `docs/DB-ROLES.md`).
-
-### Workspaces SELECT is open (G5 round 2, SHOULD B)
-
-`workspaces` keeps `SELECT USING (true)` for `pingzo_app`, because the workspace ceiling at create and the transfer target's cap count rows across workspaces. So a route whose permission check is broken still returns another workspace's name, kind and status (`GET /v1/workspaces/:id`). `60-rls.test.ts` pins this behavior. At C-1d, SELECT is scoped to the context or `owner_id` = the caller, and the two counts move into SECURITY DEFINER count functions.
-
-### Owner not tied to an owner member row (G5 round 2, N1)
-
-The UPDATE policy on `workspaces` does not check that a new `owner_id` holds the owner row in `members`. A query bug inside the caller's own workspace could make any account its owner, using up that account's 3-workspace cap and blocking its account deletion as "shared". The transfer route's member check prevents this today.
+In PostgreSQL 16, `pingzo_owner` cannot revoke its own membership of `pingzo_keyresolver` (and, from C-1d, `pingzo_counter`), because the superuser made the grant. The superuser step in the role bootstrap does it after the migrations (see `docs/DB-ROLES.md`).
 
 ### Production role check (G5 round 2, N2)
 
@@ -75,8 +63,59 @@ The T-ROLE check that no app role is a member of `pingzo_keyresolver` proves onl
 
 ### Tables without RLS (G5 round 2, N3)
 
-`workspace_limits` and `audit_log` have no row-level security and are readable across workspaces (numbers and ids only). `TRUNCATE` is not yet in the privilege matrix in `00-role.test.ts`.
+`workspace_limits` and `audit_log` have no row-level security and are readable across workspaces (numbers and ids only).
 
 ### No concurrency tests (G5 round 2, N4)
 
 No test races two transfers against the target's cap, or account deletion against a transfer. Their serialization (the account row lock, then workspaces) comes from reading the code, not from a test.
+
+## C-1d (publish, limits, disk guard and pool)
+
+Accepted for C-1d. Each has a later step that closes it.
+
+### A failed publish still counts
+
+The workspace bucket, the workspace daily counter and the global counter are debited, each in its own statement, before the main transaction runs. If the main transaction then fails (a body that is too large, a 503 `busy`, an idempotency conflict, a pause flag), the debit stays. A client that retries a refused publish uses up its allowance faster. This is intended: a refused or failed attempt costs the service something, and a debit that could be undone would need the debit and the publish in one transaction, which would hold a counter row lock for the whole publish.
+
+The global ceiling is checked and counted in one statement, but writers on different shards do not wait on each other, so the day's total can pass `max_msgs_per_day_total` by about the number of publishes in flight at once.
+
+### Test hooks (`holdAfterSeqMs`, `lockTimeoutMs`)
+
+`AppDeps.testHooks.holdAfterSeqMs` holds a publish transaction after it takes its `seq`, with `statement_timeout` and `idle_in_transaction_session_timeout` off on that connection only. `AppDeps.testHooks.lockTimeoutMs` overrides `lock_timeout` for one app instance (and sets `statement_timeout` 5 seconds above it, so that the wait is not cut short). Both come from `deps` only, never from config or the environment, like `skipPermissionChecks` (NOTE 9). They are to be excluded from production builds later.
+
+### Bucket retention (with NOTE 15)
+
+`rate_buckets` rows named `ip:<address>` and `acct:<account id>` hold personal data and have no retention yet. Nothing purges them, nor the `ws:` rows, `workspace_usage_daily`, `global_usage_minute` or `idempotency_keys`. The purge comes at C-1g, together with the other retention jobs in NOTE 15, and the privacy policy must cover these records.
+
+### Publish details
+
+- A session caller is charged to its `acct:` bucket after its session check, so a request with no valid session is charged to nothing. Only key callers are charged to an `ip:` bucket first.
+- The publish permission check (`message.post`) does not lock the workspace row, unlike `authorize` for other actions, so publishes to different topics of one workspace do not wait on each other. A membership change that commits between the preflight and the main transaction is seen by the second check; one that commits after it is not.
+- A person's message has the sender label `Member` for now. The sender account id is stored; a display name comes with the clients.
+- A committed idempotency row whose message has since been deleted (a topic deleted with its messages) answers 409 `idempotency_conflict` until the row is 24 hours old.
+
+### Flag clearing is admin by convention (A6)
+
+`clearServiceFlag` is the only code that clears `signup_paused` or `publish_paused_non_internal`, and it writes an `audit_log` row (`service.flag_clear`). There is no HTTP admin route yet, and the `pingzo_maintainer` role can also `UPDATE` those two columns directly, so "only a logged admin action clears a flag" holds by convention until the admin surface exists. The role is test bootstrap only; production provisioning is at C-1k.
+
+### Disk guard (A6)
+
+- Only stage (a) is built: the check logic and its tests. Nothing calls it yet; its process arrives at C-1f, and alert delivery at C-1h (`service_alerts.delivered_at` stays null).
+- The host status file is JSON, `{"used_percent": 83.5}`. `PINGZO_DISK_STATUS_PATH` is optional; unset, missing, unreadable or malformed gives one `disk_status_missing` alert and never a startup failure.
+- An alert is raised when its flag flips from clear to set. After an admin clears a flag, the next reading at or over the threshold raises the alert again.
+
+### Busy mapping (A7)
+
+Only SQLSTATE `55P03` and the pool's connection timeout map to 503 `busy`. A `statement_timeout` (`57014`) is still a 500.
+
+### Account deletion leaves three C-1d references (G5 S3)
+
+Deleting an account does not yet remove three C-1d values that point at it: the sender id on its messages (`messages.sender_account_id`, no foreign key; the messages belong to the workspace and stay), its idempotency rows (`idempotency_keys.caller = 'a:<id>'`), and its rate bucket (`rate_buckets` key `acct:<id>`). The app has no DELETE on those two tables and no UPDATE on that column, and widening its grants is not part of C-1d. The C-1g purge removes or clears all three; until then the account id stays in those rows.
+
+## Closed at C-1d
+
+- Context is wider than the path (NOTE 7): `withPathContext` in `db.ts` sets the context to the path workspace intersected with the caller's memberships; it never adds one.
+- Workspaces SELECT is open (G5 round 2, SHOULD B): migration `0004` scopes the policy to the context or `owner_id` = the caller, and the two cross-workspace counts moved into the SECURITY DEFINER functions `count_owned_workspaces` and `count_workspaces_total`, owned by `pingzo_counter`.
+- Owner not tied to an owner member row (G5 round 2, N1): migration `0004` adds the owner-row `EXISTS` to the `workspaces` UPDATE policy's `WITH CHECK`.
+- `TRUNCATE` missing from the privilege matrix (G5 round 2, N3): `00-role.test.ts` now checks that `pingzo_app` has no `TRUNCATE` on any table.
+- Key compare (NOTE 11, the compare part): `resolve_topic_key` keeps its `=` on the hash inside SQL, and the app does no constant-time compare. The compared value is the SHA-256 of a 256-bit random secret, so a timing leak shows at most a match of a hash prefix, and using that is a preimage problem. The id lookup is covered by the 40-bit id space and the per-IP bucket (A3, run 3). The schema name (`public.`, not `pingzo.`) is still as noted above.

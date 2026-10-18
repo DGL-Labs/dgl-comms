@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { withContext, withKeyContext } from "../../src/db.ts";
+import { withContext, withKeyContext, withPathContext } from "../../src/db.ts";
 import { hashToken } from "../../src/tokens.ts";
 import {
   api,
@@ -36,9 +36,14 @@ describe("T-RLS and T-KEYCTX", () => {
     secret: string,
     extra: { expiresAt?: Date; revokedAt?: Date } = {},
   ): Promise<string> {
-    const topicId = randomUUID();
-    await withContext(t.pool, { accountId: owner.accountId }, (tx) =>
-      tx.query(
+    // A key needs a topic of its own workspace (the composite foreign key).
+    return withContext(t.pool, { accountId: owner.accountId }, async (tx) => {
+      const made = await tx.query<{ id: string }>(
+        "INSERT INTO topics (workspace_id, name) VALUES ($1, 'Seed') RETURNING id",
+        [workspaceId],
+      );
+      const topicId = made.rows[0]?.id as string;
+      await tx.query(
         `INSERT INTO topic_keys (id, key_hash, topic_id, workspace_id, expires_at, revoked_at)
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [
@@ -49,9 +54,9 @@ describe("T-RLS and T-KEYCTX", () => {
           extra.expiresAt ?? null,
           extra.revokedAt ?? null,
         ],
-      ),
-    );
-    return topicId;
+      );
+      return topicId;
+    });
   }
 
   beforeAll(async () => {
@@ -303,15 +308,14 @@ describe("T-RLS and T-KEYCTX", () => {
         expect(members.statusCode).toBe(200);
         expect(members.json<{ members: unknown[] }>().members).toEqual([]);
 
-        // Known gap (docs/KNOWN-GAPS.md): SELECT on workspaces is open, so a
-        // broken check still reads B's own row. Pinned until C-1d scopes it.
+        // SELECT on workspaces is scoped (C-1d A0): a broken check no longer
+        // reads B's own row.
         const read = await broken.inject({
           method: "GET",
           url: `/v1/workspaces/${wsB}`,
           headers,
         });
-        expect(read.statusCode).toBe(200);
-        expect(read.json<{ id: string }>().id).toBe(wsB);
+        expect(read.statusCode).toBe(404);
 
         const removed = await broken.inject({
           method: "DELETE",
@@ -346,6 +350,406 @@ describe("T-RLS and T-KEYCTX", () => {
           },
         );
         expect(after).toEqual({ members: 1, invitations: 1 });
+        expect(await snapshot()).toEqual(before);
+      } finally {
+        await broken.close();
+      }
+    });
+  });
+
+  describe("A0: path context, scoped workspaces, count functions", () => {
+    it("workspaces SELECT shows the context's workspaces and the caller's own", async () => {
+      const ids = (settings: { accountId?: string; workspaceIds?: string[] }) =>
+        inContext(t.pool, settings, async (c) =>
+          (await c.query<{ id: string }>("SELECT id FROM workspaces")).rows
+            .map((r) => r.id)
+            .sort(),
+        );
+      expect(await ids({})).toEqual([]);
+      expect(await ids({ workspaceIds: [wsA] })).toEqual([wsA]);
+      expect(await ids({ accountId: b.accountId })).toEqual([wsB]);
+      expect(await ids({ accountId: a.accountId })).toEqual(
+        [wsA, wsSuspended].sort(),
+      );
+    });
+
+    it("withPathContext holds only the path workspace for a member", async () => {
+      const seen = await withPathContext(
+        t.pool,
+        { accountId: a.accountId },
+        wsA,
+        async (tx) => {
+          const setting = await tx.query<{ v: string }>(
+            "SELECT current_setting('app.workspace_ids', true) AS v",
+          );
+          const workspaces = await tx.query<{ id: string }>(
+            "SELECT id FROM workspaces WHERE id = ANY ($1::uuid[])",
+            [[wsA, wsSuspended]],
+          );
+          return {
+            setting: setting.rows[0]?.v,
+            ids: workspaces.rows.map((r) => r.id),
+          };
+        },
+      );
+      // A is a member of wsA and wsSuspended and owns both: the setting holds
+      // only wsA, and so does what the context shows of members. (workspaces
+      // also shows the caller's own rows, by owner.)
+      expect(seen.setting).toBe(`{${wsA}}`);
+      expect(seen.ids.sort()).toEqual([wsA, wsSuspended].sort());
+    });
+
+    it("withPathContext gives a non-member an empty context and never adds", async () => {
+      const seen = await withPathContext(
+        t.pool,
+        { accountId: a.accountId },
+        wsB,
+        async (tx) => {
+          const setting = await tx.query<{ v: string }>(
+            "SELECT current_setting('app.workspace_ids', true) AS v",
+          );
+          const workspaces = await tx.query(
+            "SELECT id FROM workspaces WHERE id = $1",
+            [wsB],
+          );
+          const members = await tx.query(
+            "SELECT 1 FROM members WHERE workspace_id = $1",
+            [wsB],
+          );
+          return {
+            setting: setting.rows[0]?.v,
+            workspaces: workspaces.rowCount,
+            members: members.rowCount,
+          };
+        },
+      );
+      expect(seen).toEqual({ setting: "{}", workspaces: 0, members: 0 });
+    });
+
+    it("an owner change to an account without the owner row is refused", async () => {
+      // B is not a member of wsA, so it has no owner row there, even with the
+      // context set to wsA.
+      await expect(
+        inContext(
+          t.pool,
+          { accountId: a.accountId, workspaceIds: [wsA] },
+          (c) =>
+            c.query("UPDATE workspaces SET owner_id = $2 WHERE id = $1", [
+              wsA,
+              b.accountId,
+            ]),
+        ),
+      ).rejects.toThrow(/row-level security/);
+    });
+
+    it("the count functions count owners and are closed to PUBLIC", async () => {
+      const res = await t.pool.query<{
+        owned: number;
+        total: number;
+        none: number | null;
+      }>(
+        `SELECT count_owned_workspaces($1) AS owned,
+                count_workspaces_total() AS total,
+                count_owned_workspaces(NULL) AS none`,
+        [a.accountId],
+      );
+      expect(res.rows[0]).toEqual({ owned: 2, total: 3, none: null });
+      const priv = await t.pool.query<{
+        owned_pub: boolean;
+        total_pub: boolean;
+        owned_app: boolean;
+        total_app: boolean;
+      }>(
+        `SELECT has_function_privilege('public', 'count_owned_workspaces(uuid)', 'EXECUTE') AS owned_pub,
+                has_function_privilege('public', 'count_workspaces_total()', 'EXECUTE') AS total_pub,
+                has_function_privilege('pingzo_app', 'count_owned_workspaces(uuid)', 'EXECUTE') AS owned_app,
+                has_function_privilege('pingzo_app', 'count_workspaces_total()', 'EXECUTE') AS total_app`,
+      );
+      expect(priv.rows[0]).toEqual({
+        owned_pub: false,
+        total_pub: false,
+        owned_app: true,
+        total_app: true,
+      });
+    });
+
+    it("the count functions are STRICT STABLE SECURITY DEFINER with a fixed search_path", async () => {
+      const res = await t.pool.query<{
+        proname: string;
+        prosecdef: boolean;
+        proisstrict: boolean;
+        provolatile: string;
+        proconfig: string[] | null;
+        owner: string;
+      }>(
+        `SELECT p.proname, p.prosecdef, p.proisstrict, p.provolatile, p.proconfig,
+                r.rolname AS owner
+           FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+          WHERE p.proname IN ('count_owned_workspaces', 'count_workspaces_total')
+            AND p.pronamespace = 'public'::regnamespace
+          ORDER BY p.proname`,
+      );
+      expect(res.rows).toHaveLength(2);
+      for (const row of res.rows) {
+        expect(row.prosecdef, row.proname).toBe(true);
+        expect(row.proisstrict, row.proname).toBe(true);
+        expect(row.provolatile, row.proname).toBe("s");
+        expect(row.proconfig, row.proname).toContain(
+          "search_path=pg_catalog, pg_temp",
+        );
+        expect(row.owner, row.proname).toBe("pingzo_counter");
+      }
+    });
+  });
+
+  describe("T-RLS: topics, subscriptions, topic_keys, messages, fanout_jobs", () => {
+    const tables = [
+      "topics",
+      "subscriptions",
+      "topic_keys",
+      "messages",
+      "fanout_jobs",
+    ] as const;
+    let topicA: string;
+    let topicB: string;
+    let messageB: string;
+
+    // A topic with a subscription, a message and a fanout job.
+    async function seedTopic(owner: User, workspaceId: string) {
+      return withContext(t.pool, { accountId: owner.accountId }, async (tx) => {
+        const topic = await tx.query<{ id: string }>(
+          "INSERT INTO topics (workspace_id, name) VALUES ($1, 'Seed') RETURNING id",
+          [workspaceId],
+        );
+        const topicId = topic.rows[0]?.id as string;
+        await tx.query(
+          `INSERT INTO subscriptions (account_id, topic_id, workspace_id)
+           VALUES ($1, $2, $3)`,
+          [owner.accountId, topicId, workspaceId],
+        );
+        const message = await tx.query<{ id: string }>(
+          `INSERT INTO messages (topic_id, workspace_id, seq, sender_label, sender_kind, body)
+           VALUES ($1, $2, 1, 'Seed', 'system', 'hello') RETURNING id`,
+          [topicId, workspaceId],
+        );
+        const messageId = message.rows[0]?.id as string;
+        await tx.query(
+          "INSERT INTO fanout_jobs (message_id, workspace_id) VALUES ($1, $2)",
+          [messageId, workspaceId],
+        );
+        return { topicId, messageId };
+      });
+    }
+
+    beforeAll(async () => {
+      topicA = (await seedTopic(a, wsA)).topicId;
+      const seededB = await seedTopic(b, wsB);
+      topicB = seededB.topicId;
+      messageB = seededB.messageId;
+      await seedKey(a, wsA, "pz_iiiiiiii", "rls-secret-i");
+      await seedKey(b, wsB, "pz_jjjjjjjj", "rls-secret-j");
+    });
+
+    it("context A: sees its own rows and none of B, in all five tables", async () => {
+      for (const table of tables) {
+        const res = await inContext(t.pool, { workspaceIds: [wsA] }, (c) =>
+          c.query<{ mine: number; theirs: number }>(
+            `SELECT count(*) FILTER (WHERE workspace_id = $1)::int AS mine,
+                    count(*) FILTER (WHERE workspace_id = $2)::int AS theirs
+               FROM ${table}`,
+            [wsA, wsB],
+          ),
+        );
+        expect(res.rows[0]?.mine, `${table} positive control`).toBeGreaterThan(
+          0,
+        );
+        expect(res.rows[0]?.theirs, table).toBe(0);
+      }
+    });
+
+    it("a missing or empty context gives zero rows in all five tables", async () => {
+      for (const table of tables) {
+        const none = await inContext(t.pool, {}, (c) =>
+          c.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`),
+        );
+        expect(none.rows[0]?.n, `${table} missing`).toBe(0);
+        for (const raw of ["", "{}"]) {
+          const empty = await inContext(t.pool, { raw }, (c) =>
+            c.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`),
+          );
+          expect(empty.rows[0]?.n, `${table} '${raw}'`).toBe(0);
+        }
+      }
+    });
+
+    it("WITH CHECK refuses inserting a B row under context A", async () => {
+      const inserts: Record<string, [string, unknown[]]> = {
+        topics: [
+          "INSERT INTO topics (workspace_id, name) VALUES ($1, 'x')",
+          [wsB],
+        ],
+        subscriptions: [
+          `INSERT INTO subscriptions (account_id, topic_id, workspace_id)
+           VALUES ($1, $2, $3)`,
+          [a.accountId, topicB, wsB],
+        ],
+        messages: [
+          `INSERT INTO messages (topic_id, workspace_id, seq, sender_label, sender_kind, body)
+           VALUES ($1, $2, 2, 'x', 'system', 'x')`,
+          [topicB, wsB],
+        ],
+        fanout_jobs: [
+          "INSERT INTO fanout_jobs (message_id, workspace_id) VALUES ($1, $2)",
+          [messageB, wsB],
+        ],
+      };
+      for (const [table, [sql, values]] of Object.entries(inserts)) {
+        await expect(
+          inContext(
+            t.pool,
+            { accountId: a.accountId, workspaceIds: [wsA] },
+            (c) => c.query(sql, values),
+          ),
+          table,
+        ).rejects.toThrow(/row-level security/);
+      }
+    });
+
+    it("WITH CHECK refuses moving an A row to B", async () => {
+      for (const table of ["topics", "subscriptions"]) {
+        await expect(
+          inContext(
+            t.pool,
+            { accountId: a.accountId, workspaceIds: [wsA] },
+            (c) =>
+              c.query(
+                `UPDATE ${table} SET workspace_id = $2 WHERE workspace_id = $1`,
+                [wsA, wsB],
+              ),
+          ),
+          table,
+        ).rejects.toThrow(/row-level security/);
+      }
+    });
+
+    it("UPDATE and DELETE do not reach B rows", async () => {
+      for (const table of ["topics", "subscriptions"]) {
+        const res = await inContext(t.pool, { workspaceIds: [wsA] }, (c) =>
+          c.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [wsB]),
+        );
+        expect(res.rowCount, table).toBe(0);
+      }
+      const named = await inContext(t.pool, { workspaceIds: [wsA] }, (c) =>
+        c.query("UPDATE topics SET name = 'x' WHERE id = $1", [topicB]),
+      );
+      expect(named.rowCount).toBe(0);
+    });
+
+    it("messages and fanout_jobs have no UPDATE or DELETE for the app", async () => {
+      for (const table of ["messages", "fanout_jobs"]) {
+        await expect(
+          inContext(t.pool, { workspaceIds: [wsA] }, (c) =>
+            c.query(`DELETE FROM ${table}`),
+          ),
+          `${table} delete`,
+        ).rejects.toThrow(/permission denied/);
+        await expect(
+          inContext(t.pool, { workspaceIds: [wsA] }, (c) =>
+            c.query(`UPDATE ${table} SET workspace_id = workspace_id`),
+          ),
+          `${table} update`,
+        ).rejects.toThrow(/permission denied/);
+      }
+    });
+
+    it("the composite foreign key refuses a child that names another workspace's topic", async () => {
+      const both = { accountId: a.accountId, workspaceIds: [wsA, wsB] };
+      const inserts: Record<string, [string, unknown[]]> = {
+        subscriptions: [
+          `INSERT INTO subscriptions (account_id, topic_id, workspace_id)
+           VALUES ($1, $2, $3)`,
+          [b.accountId, topicA, wsB],
+        ],
+        messages: [
+          `INSERT INTO messages (topic_id, workspace_id, seq, sender_label, sender_kind, body)
+           VALUES ($1, $2, 9, 'x', 'system', 'x')`,
+          [topicA, wsB],
+        ],
+        topic_keys: [
+          `INSERT INTO topic_keys (id, key_hash, topic_id, workspace_id)
+           VALUES ('pz_cccccccc', $1, $2, $3)`,
+          [hashToken("fk-probe"), topicA, wsB],
+        ],
+      };
+      for (const [table, [sql, values]] of Object.entries(inserts)) {
+        await expect(
+          inContext(t.pool, both, (c) => c.query(sql, values)),
+          table,
+        ).rejects.toThrow(/violates foreign key constraint/);
+      }
+    });
+
+    it("a route with its permission check skipped still gets no B topics or keys", async () => {
+      const broken = await appWithHooks(t, { skipPermissionChecks: true });
+      try {
+        const headers = { authorization: `Bearer ${a.accessToken}` };
+        const snapshot = () =>
+          inContext(t.pool, { workspaceIds: [wsB] }, async (c) => {
+            const one = async (sql: string) => (await c.query(sql, [wsB])).rows;
+            return {
+              topics: await one(
+                "SELECT id, name FROM topics WHERE workspace_id = $1 ORDER BY id",
+              ),
+              keys: await one(
+                "SELECT id, revoked_at, rotated_at, expires_at FROM topic_keys WHERE workspace_id = $1 ORDER BY id",
+              ),
+              messages: await one(
+                "SELECT id FROM messages WHERE workspace_id = $1 ORDER BY id",
+              ),
+            };
+          });
+        const before = await snapshot();
+        expect(before.topics.length).toBeGreaterThan(0);
+        expect(before.keys.length).toBeGreaterThan(0);
+
+        const send = (
+          method: "GET" | "POST" | "PATCH" | "DELETE",
+          url: string,
+          payload?: object,
+        ) =>
+          broken.inject({
+            method,
+            url,
+            headers,
+            ...(payload === undefined ? {} : { payload }),
+          });
+
+        const listed = await send("GET", `/v1/workspaces/${wsB}/topics`);
+        expect(listed.statusCode).toBe(200);
+        expect(listed.json<{ topics: unknown[] }>().topics).toEqual([]);
+        const keys = await send("GET", `/v1/workspaces/${wsB}/keys`);
+        expect(keys.statusCode).toBe(200);
+        expect(keys.json<{ keys: unknown[] }>().keys).toEqual([]);
+
+        // Nothing is made in B: the workspace is outside the narrowed context.
+        const made = await send("POST", `/v1/workspaces/${wsB}/topics`, {
+          name: "Taken",
+        });
+        expect(made.statusCode).toBe(500);
+
+        const renamed = await send("PATCH", `/v1/topics/${topicB}`, {
+          name: "Taken",
+        });
+        expect(renamed.statusCode).toBe(404);
+        const keyed = await send("POST", `/v1/topics/${topicB}/keys`);
+        expect(keyed.statusCode).toBe(404);
+        const rotated = await send("POST", "/v1/keys/pz_jjjjjjjj/rotate");
+        expect(rotated.statusCode).toBe(404);
+        const revoked = await send("DELETE", "/v1/keys/pz_jjjjjjjj");
+        expect(revoked.statusCode).toBe(404);
+        const deleted = await send("DELETE", `/v1/topics/${topicB}`);
+        expect(deleted.statusCode).toBe(404);
+
         expect(await snapshot()).toEqual(before);
       } finally {
         await broken.close();

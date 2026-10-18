@@ -7,6 +7,7 @@ import {
   makeApp,
   makeUser,
   ownerPool,
+  withAllWorkspaces,
 } from "./harness.ts";
 import type { TestApp, User } from "./harness.ts";
 
@@ -94,7 +95,9 @@ describe("workspaces", () => {
         const res = await api(t, owner, "POST", "/v1/workspaces", payload);
         expect(res.statusCode, JSON.stringify(payload)).toBe(400);
       }
-      const none = await t.pool.query("SELECT 1 FROM workspaces");
+      const none = await withAllWorkspaces(t.pool, (c) =>
+        c.query("SELECT 1 FROM workspaces"),
+      );
       expect(none.rowCount).toBe(0);
     });
 
@@ -133,9 +136,8 @@ describe("workspaces", () => {
         const got = await api(t, who, "GET", `/v1/workspaces/${id}`);
         expect(got.statusCode).toBe(404);
       }
-      const rows = await t.pool.query(
-        "SELECT 1 FROM workspaces WHERE id = $1",
-        [id],
+      const rows = await withAllWorkspaces(t.pool, (c) =>
+        c.query("SELECT 1 FROM workspaces WHERE id = $1", [id]),
       );
       expect(rows.rowCount).toBe(0);
     });
@@ -337,9 +339,11 @@ describe("workspaces", () => {
       );
       expect(map.get(admin.accountId)).toBe("owner");
       expect(map.get(owner.accountId)).toBe("admin");
-      const row = await t.pool.query<{ owner_id: string }>(
-        "SELECT owner_id FROM workspaces WHERE id = $1",
-        [id],
+      const row = await withAllWorkspaces(t.pool, (c) =>
+        c.query<{ owner_id: string }>(
+          "SELECT owner_id FROM workspaces WHERE id = $1",
+          [id],
+        ),
       );
       expect(row.rows[0]?.owner_id).toBe(admin.accountId);
       // The old owner can no longer delete.
@@ -397,9 +401,11 @@ describe("workspaces", () => {
         kind: "team",
       });
       expect(res.statusCode).toBe(409);
-      const count = await t.pool.query<{ n: number }>(
-        "SELECT count(*)::int AS n FROM workspaces WHERE owner_id = $1",
-        [owner.accountId],
+      const count = await withAllWorkspaces(t.pool, (c) =>
+        c.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM workspaces WHERE owner_id = $1",
+          [owner.accountId],
+        ),
       );
       expect(count.rows[0]?.n).toBe(3);
       // Another account is not affected.
@@ -417,8 +423,8 @@ describe("workspaces", () => {
     it("refuses with 503 when the global ceiling is reached", async () => {
       const owner_ = ownerPool();
       try {
-        const existing = await t.pool.query<{ n: number }>(
-          "SELECT count(*)::int AS n FROM workspaces",
+        const existing = await withAllWorkspaces(t.pool, (c) =>
+          c.query<{ n: number }>("SELECT count(*)::int AS n FROM workspaces"),
         );
         const n = existing.rows[0]?.n ?? 0;
         await createWorkspace(t, owner, "First");
