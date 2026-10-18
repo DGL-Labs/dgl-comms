@@ -1,4 +1,6 @@
 import { appendFileSync } from "node:fs";
+import http from "node:http";
+import type { IncomingHttpHeaders } from "node:http";
 import type { FastifyInstance } from "fastify";
 import pg from "pg";
 import type { Pool, PoolClient } from "pg";
@@ -275,6 +277,8 @@ export async function appWithHooks(
     skipPermissionChecks?: boolean;
     holdAfterSeqMs?: number;
     lockTimeoutMs?: number;
+    streamKeepaliveMs?: number;
+    streamProcessCap?: number;
   },
 ): Promise<FastifyInstance> {
   const logFile = inject("logFile");
@@ -289,6 +293,99 @@ export async function appWithHooks(
   });
   await app.ready();
   return app;
+}
+
+export interface SseEvent {
+  id: string | null;
+  event: string;
+  data: string;
+}
+
+// A stream read over a real socket (inject does not stream). Error replies
+// (401, 429 and so on) come back as a status and a body, with no events.
+export interface StreamClient {
+  status: number;
+  headers: IncomingHttpHeaders;
+  events: SseEvent[];
+  comments: string[];
+  body: string;
+  closed: boolean;
+  until(check: () => boolean, ms?: number): Promise<void>;
+  close(): void;
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Polls until check passes, or throws once ms have passed.
+export async function until(check: () => boolean, ms = 10_000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > end) throw new Error("timed out waiting for a condition");
+    await sleepMs(20);
+  }
+}
+
+// Starts the app on a free port of 127.0.0.1 and returns its base URL.
+export function listenOnFreePort(app: FastifyInstance): Promise<string> {
+  return app.listen({ host: "127.0.0.1", port: 0 });
+}
+
+// GET /v1/topics/:id/stream, resolved once the response headers are in.
+export function openStream(
+  baseUrl: string,
+  topicId: string,
+  headers: Record<string, string> = {},
+  query = "",
+): Promise<StreamClient> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(
+      `${baseUrl}/v1/topics/${topicId}/stream${query}`,
+      { headers },
+      (res) => {
+        res.setEncoding("utf8");
+        let pending = "";
+        const client: StreamClient = {
+          status: res.statusCode ?? 0,
+          headers: res.headers,
+          events: [],
+          comments: [],
+          body: "",
+          closed: false,
+          until: (check, ms) => until(check, ms),
+          close: () => req.destroy(),
+        };
+        res.on("data", (chunk: string) => {
+          client.body += chunk;
+          pending += chunk;
+          let end = pending.indexOf("\n\n");
+          while (end !== -1) {
+            const block = pending.slice(0, end);
+            pending = pending.slice(end + 2);
+            end = pending.indexOf("\n\n");
+            const lines = block.split("\n");
+            if (lines.every((line) => line.startsWith(":"))) {
+              client.comments.push(...lines);
+              continue;
+            }
+            const event: SseEvent = { id: null, event: "message", data: "" };
+            for (const line of lines) {
+              if (line.startsWith("id: ")) event.id = line.slice(4);
+              else if (line.startsWith("event: ")) event.event = line.slice(7);
+              else if (line.startsWith("data: ")) event.data = line.slice(6);
+            }
+            client.events.push(event);
+          }
+        });
+        res.on("close", () => {
+          client.closed = true;
+        });
+        resolve(client);
+      },
+    );
+    req.on("error", reject);
+  });
 }
 
 // Runs raw SQL as pingzo_app in a transaction with the given request context
