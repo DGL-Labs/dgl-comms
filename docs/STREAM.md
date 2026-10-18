@@ -20,6 +20,8 @@ behind a flag.
 - **Order and duplicates.** Within a stream, every message arrives once, in seq order. Across reconnects, use
   `Last-Event-ID`, and drop any seq you have already processed.
 - **Keepalive.** A comment line (`: keepalive`) every 25 seconds. Treat a long silence as a dead connection and reconnect.
+- **Server shutdown while a stream opens.** If the server starts to close before the stream has opened, the request gets
+  503 `{"error": "server_closing"}` with `Retry-After: 1`. Reconnect with backoff and `Last-Event-ID`.
 
 ### Events
 
@@ -36,8 +38,9 @@ A `gap` and an `end` never move your `Last-Event-ID`.
 | `reason` | What the client should do |
 |---|---|
 | `token_expired` | The access token ran out. Refresh it, then reconnect with `Last-Event-ID`. |
-| `revoked` | Access was lost: removed from the workspace, signed out, account deleted, topic deleted or workspace suspended. Do not reconnect blindly: refresh and check access first. A reconnect without access gets 401 or 404. |
-| `server_closing` | The server is restarting. Reconnect with backoff and `Last-Event-ID`. |
+| `token_refreshed` | The access token that opened this stream was replaced by `POST /v1/auth/refresh` (a refresh revokes the old session, so the old token no longer works). This is not lost access: reconnect at once with the new access token and `Last-Event-ID`. |
+| `revoked` | Access was lost: removed from the workspace, signed out (logout or logout-all), account deleted, topic deleted or workspace suspended. Do not reconnect blindly: refresh and check access first. A reconnect without access gets 401 or 404. |
+| `server_closing` | The server is restarting, or it could not re-check this stream's access 3 times in a row. Reconnect with backoff and `Last-Event-ID`; the reconnect checks access in full. |
 
 A dropped connection with no `end` event is a network failure: reconnect with backoff and `Last-Event-ID`.
 
@@ -62,5 +65,11 @@ A dropped connection with no `end` event is a network failure: reconnect with ba
 
 - **Revocation:** a stream closes within 5 seconds of a revocation. If the server's notification channel is down, it
   closes within 60 seconds, through a periodic access re-check.
+  - **Scale limit:** the 5 seconds is shown at test scale. Each server process re-checks its streams one at a time, at a
+    few milliseconds each. A revocation that touches many streams at once (for example, a workspace suspension with
+    hundreds of open streams) closes them in turn. Near the 2,000-stream process cap, the last one can take 10 seconds or
+    more. This must be closed before the first deploy (KNOWN-GAPS, C-1e).
+  - A re-check that fails 3 times in a row, on database errors, ends the stream with `server_closing`: access that cannot
+    be proven is not kept.
 - **Delivery during an outage:** if the server loses its notification channel, delivery continues by polling every 5
   seconds. After the channel returns, each topic catches up once, in order.

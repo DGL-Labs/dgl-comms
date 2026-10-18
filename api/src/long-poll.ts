@@ -125,6 +125,9 @@ export function registerLongPollRoutes(
       gone = true;
       wakeTopic(topicId);
     });
+    // The socket may have closed while the session was read, before the
+    // listener was attached.
+    if (request.raw.socket.destroyed) gone = true;
     try {
       const access = await streamAccess(ctx, session.accountId, topicId);
       if (access.kind !== "ok") return deny(request, reply, access);

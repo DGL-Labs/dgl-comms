@@ -1,5 +1,5 @@
 import type { ServerResponse } from "node:http";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Ctx } from "./context.ts";
 import { first, withPathContext, withWorkspaceTx } from "./db.ts";
 import { inFoundWorkspace } from "./found-scope.ts";
@@ -15,12 +15,16 @@ const KEEPALIVE_MS = 25_000;
 // Every open stream re-checks its access this often, so a revocation holds
 // while LISTEN is down.
 const RECHECK_MS = 60_000;
+// A stream whose re-check fails this many times in a row (a database error,
+// not a no) is ended, so that its access is proven again by a fresh open.
+const RECHECK_FAILURES_MAX = 3;
 // While LISTEN is down, each topic with open streams is polled this often.
 const POLL_MS = 5_000;
 // Reasons that the client is told about, with event: end.
 const END_EVENT_REASONS: ReadonlySet<string> = new Set([
   "revoked",
   "token_expired",
+  "token_refreshed",
   "server_closing",
 ]);
 const MAX_PER_SESSION = 3;
@@ -74,6 +78,8 @@ interface Stream {
   expiryTimer: ReturnType<typeof setTimeout> | null;
   // An access re-check is waiting in the queue.
   queued: boolean;
+  // Re-checks in a row that failed with an error.
+  failures: number;
   // A hint named this stream before it went live: re-check as soon as it does.
   hinted: boolean;
   end(reason: string): void;
@@ -447,34 +453,62 @@ export function registerStreamRoutes(
   // The access check of a stream that is already open, in one short
   // transaction. Everything must still hold: the session (as requireSession
   // checks it), the membership with workspace.read, the topic, and an active
-  // workspace. Anything missing is a no.
-  async function stillAllowed(stream: Stream): Promise<boolean> {
+  // workspace. Anything missing is a no: "revoked", or "token_refreshed" when
+  // the session was only rotated by /v1/auth/refresh.
+  async function stillAllowed(
+    stream: Stream,
+  ): Promise<"ok" | "revoked" | "token_refreshed"> {
     return withPathContext(
       ctx.pool,
       { accountId: stream.accountId },
       stream.workspaceId,
       async (tx) => {
+        const now = ctx.clock.now();
         const session = await tx.query(
           `SELECT s.id
              FROM sessions s JOIN accounts a ON a.id = s.account_id
             WHERE s.id = $1 AND s.account_id = $2
               AND s.revoked_at IS NULL AND s.expires_at > $3
               AND a.status = 'active'`,
-          [stream.sessionId, stream.accountId, ctx.clock.now()],
+          [stream.sessionId, stream.accountId, now],
         );
-        if (first(session.rows) === undefined) return false;
+        if (first(session.rows) === undefined) {
+          // A refresh revokes the old session and, in the same transaction,
+          // makes a newer one in the same chain. While that one is still valid
+          // the client has only swapped tokens, which is not lost access. A
+          // logout, logout-all or refresh-token reuse revokes the newer one
+          // too, so those stay "revoked".
+          const rotated = await tx.query(
+            `SELECT 1
+               FROM sessions s
+               JOIN accounts a ON a.id = s.account_id
+               JOIN sessions n ON n.account_id = s.account_id
+                AND n.chain_started_at = s.chain_started_at
+                AND n.device_id IS NOT DISTINCT FROM s.device_id
+                AND n.id <> s.id
+                AND n.created_at >= s.revoked_at
+              WHERE s.id = $1 AND s.account_id = $2
+                AND s.revoked_at IS NOT NULL AND a.status = 'active'
+                AND n.revoked_at IS NULL AND n.expires_at > $3
+              LIMIT 1`,
+            [stream.sessionId, stream.accountId, now],
+          );
+          return first(rotated.rows) === undefined
+            ? "revoked"
+            : "token_refreshed";
+        }
         const role = await memberRole(tx, stream.workspaceId, stream.accountId);
-        if (role === null || !can(role, "workspace.read")) return false;
+        if (role === null || !can(role, "workspace.read")) return "revoked";
         const topic = await tx.query(
           "SELECT id FROM topics WHERE id = $1 AND workspace_id = $2",
           [stream.topicId, stream.workspaceId],
         );
-        if (first(topic.rows) === undefined) return false;
+        if (first(topic.rows) === undefined) return "revoked";
         const workspace = await tx.query<{ status: string }>(
           "SELECT status FROM workspaces WHERE id = $1",
           [stream.workspaceId],
         );
-        return first(workspace.rows)?.status === "active";
+        return first(workspace.rows)?.status === "active" ? "ok" : "revoked";
       },
     );
   }
@@ -495,9 +529,11 @@ export function registerStreamRoutes(
     }, wait);
   }
 
-  // Queues an access re-check. The stream closes only if the check says no. A
+  // Queues an access re-check. The stream closes if the check says no. A
   // database error is not a no: the stream stays and the next re-check (a hint
-  // or the interval) tries again.
+  // or the interval) tries again. After 3 errors in a row it fails closed: the
+  // stream ends with server_closing, and the client's reconnect goes through
+  // the full access check.
   function queueRecheck(stream: Stream): void {
     if (stream.closed) return;
     if (!stream.started) {
@@ -510,9 +546,15 @@ export function registerStreamRoutes(
       stream.queued = false;
       if (stream.closed || expireIfDue(stream)) return;
       try {
-        if (!(await stillAllowed(stream))) stream.end("revoked");
+        const verdict = await stillAllowed(stream);
+        stream.failures = 0;
+        if (verdict !== "ok") stream.end(verdict);
       } catch {
+        stream.failures += 1;
         ctx.logger.log({ event: "stream_recheck", reason: "recheck_failed" });
+        if (stream.failures >= RECHECK_FAILURES_MAX) {
+          stream.end("server_closing");
+        }
       }
     });
   }
@@ -544,6 +586,17 @@ export function registerStreamRoutes(
         if (match(stream)) queueRecheck(stream);
       }
     }
+  }
+
+  // A stream that is still opening when the server starts to close gets 503,
+  // so its connection ends and app.close() does not wait on it.
+  function refuseClosing(request: FastifyRequest, reply: FastifyReply) {
+    request.reason = "server_closing";
+    return reply
+      .header("retry-after", "1")
+      .header("connection", "close")
+      .code(503)
+      .send({ error: "server_closing" });
   }
 
   function endAll(reason: string): void {
@@ -603,6 +656,10 @@ export function registerStreamRoutes(
       client.gone = true;
       if (stream !== null) stream.end("client_closed");
     });
+    // The socket may have closed while the session was read, before the
+    // listener was attached. Then "close" has already fired, and the slot
+    // would be held until the token expired.
+    if (res.destroyed || request.raw.socket.destroyed) client.gone = true;
 
     try {
       // Step 1: access. A short transaction that returns the workspace id.
@@ -610,10 +667,12 @@ export function registerStreamRoutes(
       if (access.kind === "not_found" || access.kind === "forbidden") {
         return deny(request, reply, access);
       }
-      if (client.gone || closing) {
+      // A client that has gone needs no answer.
+      if (client.gone) {
         reply.hijack();
         return reply;
       }
+      if (closing) return refuseClosing(request, reply);
 
       // Step 2: register. Live rows are buffered from here on.
       const opened = Date.now();
@@ -632,6 +691,7 @@ export function registerStreamRoutes(
         recheckTimer: null,
         expiryTimer: null,
         queued: false,
+        failures: 0,
         hinted: false,
         end(reason) {
           if (made.closed) return;
@@ -680,9 +740,14 @@ export function registerStreamRoutes(
         topicId,
         lastEventId,
       );
+      // Ended while the replay was read: the client left, or the server is
+      // closing (endAll ends a stream that has not started without a word).
       if (made.closed) {
-        reply.hijack();
-        return reply;
+        if (client.gone) {
+          reply.hijack();
+          return reply;
+        }
+        return refuseClosing(request, reply);
       }
       if (replay === null) {
         made.end("not_found");
