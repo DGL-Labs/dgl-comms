@@ -9,8 +9,29 @@ export interface Db {
   ): Promise<QueryResult<R>>;
 }
 
+// The api's share of the connection budget (docs/DB-ROLES.md): 8 connections,
+// a 2 second wait for one, and timeouts on every connection. A lock wait over
+// lock_timeout raises SQLSTATE 55P03; a wait for a connection over
+// connectionTimeoutMillis rejects with POOL_TIMEOUT_MESSAGE. Both end as 503
+// busy (isBusyError, and the error handler in app.ts).
 export function createPool(connectionString: string): Pool {
-  return new pg.Pool({ connectionString, max: 10 });
+  return new pg.Pool({
+    connectionString,
+    max: 8,
+    connectionTimeoutMillis: 2000,
+    options:
+      "-c statement_timeout=5000 -c lock_timeout=3000 -c idle_in_transaction_session_timeout=10000",
+  });
+}
+
+// What pg rejects with when no connection came free in time.
+const POOL_TIMEOUT_MESSAGE = "timeout exceeded when trying to connect";
+
+// A lock wait that timed out, or a pool that had no free connection in time:
+// both are retryable.
+export function isBusyError(error: unknown): boolean {
+  if (pgCode(error) === "55P03") return true;
+  return error instanceof Error && error.message === POOL_TIMEOUT_MESSAGE;
 }
 
 export async function withTx<T>(

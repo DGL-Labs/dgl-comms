@@ -6,6 +6,7 @@ import { loadBlocklist } from "./blocklist.ts";
 import type { Config } from "./config.ts";
 import { systemClock } from "./context.ts";
 import type { Clock, Ctx } from "./context.ts";
+import { isBusyError } from "./db.ts";
 import type { EmailSender } from "./email.ts";
 import { createLogger } from "./log.ts";
 import type { LogSink } from "./log.ts";
@@ -79,8 +80,14 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     done();
   });
 
-  // Error bodies and logs never carry the error message.
+  // Error bodies and logs never carry the error message. A lock wait that timed
+  // out (SQLSTATE 55P03) or a pool with no free connection is a retryable 503
+  // busy, on every route.
   app.setErrorHandler((error: FastifyError, request, reply) => {
+    if (isBusyError(error)) {
+      request.reason = "busy";
+      return reply.header("retry-after", "1").code(503).send({ error: "busy" });
+    }
     const client =
       error.statusCode !== undefined &&
       error.statusCode >= 400 &&
